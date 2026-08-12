@@ -4,29 +4,116 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Virtual Environment
+# Virtual environments
 venv/
 .venv/
 env/
 
-# Environment Variables
+# Environment variables
 .env
+.env.*
 
 # VS Code
 .vscode/
 
 # Node
 node_modules/
-
-# Build Files
 dist/
 build/
 
 # Logs
 *.log
 
-# macOS
+# OS
 .DS_Store
-
-# Windows
 Thumbs.db
+
+# ============================================================
+# NAKSHA RUNTIME / GENERATED DATA
+# ============================================================
+
+data/
+
+# Generated prediction outputs
+**/predictions/
+**/outputs/
+
+# ============================================================
+# LARGE AI MODEL WEIGHTS
+# ============================================================
+
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+
+# ============================================================
+# GENERATED / TEMPORARY GIS FILES
+# ============================================================
+
+*.gpkg
+*.gdb/
+*.shp
+*.shx
+*.dbf
+*.cpg
+*.aux.xml
+
+# Runtime TIFF/raster data
+data/**/*.tif
+data/**/*.tiff
+data/**/*.jp2
+
+# Delineate Anything runtime data
+backend/models/delineate_anything/data/
+backend/models/delineate_anything/figs/
+backend/models/delineate_anything/**/__pycache__/
+
+# Python cache anywhere
+**/__pycache__/
+# Training / experiment logs
+backend/lightning_logs/
+
+# Backups
+*.backup
+*.bak
+
+# Test inputs / generated test outputs
+backend/models/road/test_input/
+
+# Generated GIS/export files
+infra/docker/*.geojson
+infra/docker/*.zip
+infra/docker/*.gpkg
+infra/docker/*.tif
+infra/docker/*.png
+
+# Temporary inspection/debug files
+naksha_api_inspect.txt
+# ============================================================
+# EXTERNAL MODEL REPOSITORIES - RUNTIME DATA
+# ============================================================
+
+backend/models/ai4boundaries/figures/
+backend/models/building_reference/Images/
+backend/models/deepglobe/dataset/
+backend/models/deepglobe/logs/
+backend/models/delineate_anything/data/
+backend/models/delineate_anything/figs/
+
+# Large model weights
+backend/models/delineate_anything/DelineateAnythingv2.pt
+backend/models/building_best_unet.pth
+backend/models/road/model_best.pth
+
+# Nested Git metadata
+backend/models/ai4boundaries/.git/
+backend/models/building_reference/.git/
+backend/models/deepglobe/.git/
+backend/models/delineate_anything/.git/
+
+backend/models/building_reference/Building Footprint Extraction_Final Report.pdf
+backend/models/building_reference/Building_Footprint.ipynb
+backend/models/deepglobe/docs/
+backend/models/deepglobe/getdata/*.ipynb
