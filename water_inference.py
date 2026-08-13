@@ -8,7 +8,6 @@ import rasterio
 
 
 INPUT = "/data/raw/demo_aoi/demo_aoi_cog.tif"
-MODEL = "/root/.cache/huggingface/hub/models--Realcat--skywater_seg/snapshots"
 OUTPUT = "/app/gis_engine/postgis/water_v1.tif"
 
 TILE_SIZE = 384
@@ -26,18 +25,39 @@ STD = np.array(
 
 
 def find_model():
+    model_dir = os.getenv(
+        "SKYWATER_MODEL_DIR",
+        "/app/models/skywater"
+    )
+    model_file = os.getenv(
+        "SKYWATER_MODEL_FILE",
+        "skywater_segformer_b2_fp32.onnx"
+    )
+    model_path = Path(model_dir) / model_file
+
+    if model_path.exists():
+        return str(model_path)
+
     candidates = list(
         Path("/root/.cache/huggingface/hub").glob(
             "models--Realcat--skywater_seg/snapshots/*/skywater_segformer_b2_fp32.onnx"
         )
     )
 
-    if not candidates:
-        raise FileNotFoundError(
-            "SkyWater FP32 ONNX model was not found in the Hugging Face cache."
-        )
+    if candidates:
+        return str(candidates[-1])
 
-    return str(candidates[-1])
+    print(f"SkyWater model not found at {model_path}. Downloading from Hugging Face...")
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(
+        repo_id="Realcat/skywater_seg",
+        filename="skywater_segformer_b2_fp32.onnx",
+        local_dir=str(model_path.parent),
+        local_dir_use_symlinks=False,
+    )
+    print(f"Model downloaded to {model_path}")
+    return str(model_path)
 
 
 def preprocess(image):
@@ -69,7 +89,29 @@ def preprocess(image):
     )[None, ...]
 
 
-def main():
+def run_skywater_inference(
+    image_path,
+    output_path=None,
+):
+    """
+    Run SkyWater segmentation on an arbitrary RGB GeoTIFF.
+
+    Returns:
+        water_mask:
+            Binary uint8 raster. 1 = water, 0 = background.
+
+        water_probability:
+            Float32 raster containing the model's probability
+            for the water class.
+
+        transform:
+            Rasterio affine transform for the source image.
+    """
+
+    image_path = Path(image_path)
+
+    if output_path is not None:
+        output_path = Path(output_path)
 
     model_path = find_model()
 
@@ -86,7 +128,7 @@ def main():
     print("INPUT:", input_name)
     print("OUTPUT:", output_name)
 
-    with rasterio.open(INPUT) as src:
+    with rasterio.open(image_path) as src:
 
         rgb = src.read(
             [1, 2, 3]
@@ -95,6 +137,8 @@ def main():
         height = src.height
         width = src.width
 
+        transform = src.transform
+
         profile = src.profile.copy()
 
         water_mask = np.zeros(
@@ -102,8 +146,12 @@ def main():
             dtype=np.uint8
         )
 
+        water_probability = np.zeros(
+            (height, width),
+            dtype=np.float32
+        )
+
         total_tiles = 0
-        water_pixels = 0
 
         for y in range(
             0,
@@ -185,24 +233,45 @@ def main():
                 )
 
                 if prediction.ndim == 4:
+                    prediction = prediction[0]
 
-                    prediction = prediction[
-                        0
-                    ]
-
+                # Normalize model output to [classes, height, width]
                 if prediction.shape[0] < prediction.shape[-1]:
-
-                    classes = np.argmax(
+                    logits = np.moveaxis(
                         prediction,
-                        axis=0
+                        -1,
+                        0
                     )
-
                 else:
+                    logits = prediction
 
-                    classes = np.argmax(
-                        prediction,
-                        axis=-1
+                # Convert logits to class probabilities.
+                logits = (
+                    logits -
+                    np.max(
+                        logits,
+                        axis=0,
+                        keepdims=True
                     )
+                )
+
+                exp_logits = np.exp(
+                    logits
+                )
+
+                probabilities = (
+                    exp_logits /
+                    np.sum(
+                        exp_logits,
+                        axis=0,
+                        keepdims=True
+                    )
+                )
+
+                classes = np.argmax(
+                    probabilities,
+                    axis=0
+                )
 
                 classes = cv2.resize(
                     classes.astype(np.uint8),
@@ -211,6 +280,17 @@ def main():
                         TILE_SIZE
                     ),
                     interpolation=cv2.INTER_NEAREST
+                )
+
+                water_prob = cv2.resize(
+                    probabilities[WATER_CLASS].astype(
+                        np.float32
+                    ),
+                    (
+                        TILE_SIZE,
+                        TILE_SIZE
+                    ),
+                    interpolation=cv2.INTER_LINEAR
                 )
 
                 tile_water = (
@@ -227,9 +307,13 @@ def main():
                     np.uint8
                 )
 
-                water_pixels += int(
-                    tile_water.sum()
-                )
+                water_probability[
+                    y:y2,
+                    x:x2
+                ] = water_prob[
+                    :tile_h,
+                    :tile_w
+                ]
 
                 total_tiles += 1
 
@@ -239,29 +323,34 @@ def main():
                         total_tiles
                     )
 
-        profile.update(
-            count=1,
-            dtype="uint8",
-            nodata=0,
-            compress="lzw"
-        )
+        if output_path is not None:
 
-        Path(
-            OUTPUT
-        ).parent.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+            profile.update(
+                count=1,
+                dtype="uint8",
+                nodata=0,
+                compress="lzw"
+            )
 
-        with rasterio.open(
-            OUTPUT,
-            "w",
-            **profile
-        ) as dst:
+            output_path.parent.mkdir(
+                parents=True,
+                exist_ok=True
+            )
 
-            dst.write(
-                water_mask,
-                1
+            with rasterio.open(
+                output_path,
+                "w",
+                **profile
+            ) as dst:
+
+                dst.write(
+                    water_mask,
+                    1
+                )
+
+            print(
+                "OUTPUT:",
+                output_path
             )
 
         print(
@@ -289,14 +378,23 @@ def main():
         )
 
         print(
-            "OUTPUT:",
-            OUTPUT
-        )
-
-        print(
             "CRS:",
             src.crs
         )
+
+        return (
+            water_mask,
+            water_probability,
+            transform,
+        )
+
+
+def main():
+
+    run_skywater_inference(
+        image_path=INPUT,
+        output_path=OUTPUT,
+    )
 
 
 if __name__ == "__main__":

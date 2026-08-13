@@ -33,6 +33,8 @@ from gis_engine.postgis.export import create_layer_version_sql, create_feature_s
 
 from deepforest import main as deepforest_main
 
+from water_inference import run_skywater_inference
+
 
 
 # ============================================================
@@ -76,6 +78,7 @@ ALLOWED_LAYERS = {
     "uploaded_roads",
     "uploaded_trees",
     "uploaded_farms",
+    "uploaded_water",
 }
 
 
@@ -204,6 +207,15 @@ TREE_OUTPUT_DIR = (
 )
 
 TREE_OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+WATER_OUTPUT_DIR = (
+    DATA_DIR / "predictions" / "water"
+)
+
+WATER_OUTPUT_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
@@ -1726,6 +1738,329 @@ async def tree_inference(
             detail={
                 "message":
                     "Tree inference failed.",
+                "error":
+                    str(e)
+            }
+        )
+
+    finally:
+
+        # ----------------------------------------------------
+        # Remove temporary input
+        # ----------------------------------------------------
+
+        try:
+
+            if input_path.exists():
+
+                input_path.unlink()
+
+        except Exception:
+
+            pass
+
+
+# ============================================================
+# WATER INFERENCE
+# ============================================================
+
+@app.post("/inference/water")
+async def water_inference(
+    file: UploadFile = File(...)
+):
+
+    if not file.filename:
+
+        raise HTTPException(
+            status_code=400,
+            detail="No filename provided."
+        )
+
+    allowed_extensions = {
+        ".tif",
+        ".tiff"
+    }
+
+    extension = Path(
+        file.filename
+    ).suffix.lower()
+
+    if extension not in allowed_extensions:
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only .tif and .tiff files "
+                "are supported."
+            )
+        )
+
+    job_id = uuid.uuid4().hex[:8]
+
+    input_path = (
+        WATER_OUTPUT_DIR /
+        f"water_input_{job_id}"
+        f"{extension}"
+    )
+
+    mask_output_path = (
+        WATER_OUTPUT_DIR /
+        f"Naksha_{job_id}_water_mask.tif"
+    )
+
+    prob_output_path = (
+        WATER_OUTPUT_DIR /
+        f"Naksha_{job_id}_water_prob.tif"
+    )
+
+    try:
+
+        # ----------------------------------------------------
+        # Save upload
+        # ----------------------------------------------------
+
+        with input_path.open(
+            "wb"
+        ) as buffer:
+
+            shutil.copyfileobj(
+                file.file,
+                buffer
+            )
+
+        print(
+            f"Starting water inference: "
+            f"{input_path}"
+        )
+
+        # ----------------------------------------------------
+        # Run SkyWater inference
+        # ----------------------------------------------------
+
+        water_mask, water_probability, transform = run_skywater_inference(
+            image_path=str(input_path),
+            output_path=str(mask_output_path),
+        )
+
+        # ----------------------------------------------------
+        # Save probability raster
+        # ----------------------------------------------------
+
+        with rasterio.open(str(input_path)) as src:
+            profile = src.profile.copy()
+            profile.update(
+                count=1,
+                dtype="float32",
+                nodata=0.0,
+                compress="lzw"
+            )
+
+        prob_output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        with rasterio.open(
+            str(prob_output_path),
+            "w",
+            **profile
+        ) as dst:
+            dst.write(water_probability, 1)
+
+        # ----------------------------------------------------
+        # Statistics
+        # ----------------------------------------------------
+
+        height, width = water_mask.shape
+        water_pixels = int(np.count_nonzero(water_mask))
+        total_pixels = water_mask.size
+        water_coverage = (water_pixels / total_pixels) * 100
+
+        prob_valid = water_probability[water_probability > 0]
+        prob_min = float(prob_valid.min()) if prob_valid.size > 0 else 0.0
+        prob_max = float(prob_valid.max()) if prob_valid.size > 0 else 0.0
+        prob_mean = float(prob_valid.mean()) if prob_valid.size > 0 else 0.0
+
+        print(
+            "Water inference completed."
+        )
+        print(
+            f"Image dimensions: {width}x{height}"
+        )
+        print(
+            f"Water pixels: {water_pixels}"
+        )
+        print(
+            f"Water coverage: {water_coverage:.2f}%"
+        )
+        print(
+            f"Probability stats - min: {prob_min:.4f}, max: {prob_max:.4f}, mean: {prob_mean:.4f}"
+        )
+        print(
+            f"Mask saved to: {mask_output_path}"
+        )
+        print(
+            f"Probability saved to: {prob_output_path}"
+        )
+
+        # ----------------------------------------------------
+        # PostGIS: Polygonize mask and store water features
+        # ----------------------------------------------------
+
+        features_stored = 0
+        layer_version_id = None
+        postgis_status = "skipped"
+        postgis_error = None
+
+        try:
+            print("Polygonizing water mask...")
+
+            geometries = polygonize_mask(
+                water_mask,
+                transform,
+                min_area=0.0,
+            )
+
+            print(f"Raw water geometries: {len(geometries)}")
+
+            if geometries:
+                with get_postgis_connection() as conn:
+                    with conn.cursor() as cur:
+
+                        cur.execute(
+                            create_layer_version_sql(
+                                layer_name="uploaded_water",
+                                feature_type="water",
+                                version=1,
+                            )
+                        )
+                        layer_version_id = cur.fetchone()[0]
+
+                        print(f"Created layer version: {layer_version_id}")
+
+                        for geometry in geometries:
+                            geometry = validate_geometry(geometry)
+
+                            if geometry is None:
+                                continue
+
+                            confidence = feature_confidence(
+                                probability=water_probability,
+                                geometry=geometry,
+                                transform=transform,
+                            )
+
+                            if confidence is None:
+                                continue
+
+                            cur.execute(
+                                create_feature_sql(
+                                    layer_version_id=layer_version_id,
+                                    feature_type="water",
+                                    geometry=geometry,
+                                    confidence=confidence,
+                                )
+                            )
+                            features_stored += 1
+
+                    conn.commit()
+
+                postgis_status = "success"
+                print(f"Stored {features_stored} water features in PostGIS")
+
+        except Exception as e:
+            postgis_status = "failed"
+            postgis_error = str(e)
+            print(f"PostGIS storage failed: {e}")
+
+        # ----------------------------------------------------
+        # Return result
+        # ----------------------------------------------------
+
+        response = {
+
+            "status":
+                "success",
+
+            "job_id":
+                job_id,
+
+            "input_file":
+                file.filename,
+
+            "model":
+                "SkyWater SegFormer-B2",
+
+            "preprocessing":
+                "RGB bands 1,2,3 + ImageNet normalization + 384x384 tiling",
+
+            "output": {
+
+                "mask":
+                    str(mask_output_path),
+
+                "probability":
+                    str(prob_output_path),
+            },
+
+            "statistics": {
+
+                "image_width":
+                    width,
+
+                "image_height":
+                    height,
+
+                "water_pixels":
+                    water_pixels,
+
+                "water_coverage_percent":
+                    round(
+                        water_coverage,
+                        2
+                    ),
+
+                "probability_min":
+                    prob_min,
+
+                "probability_max":
+                    prob_max,
+
+                "probability_mean":
+                    prob_mean,
+            },
+
+            "features_stored":
+                features_stored,
+
+            "layer_version_id":
+                layer_version_id,
+
+            "postgis_status":
+                postgis_status,
+        }
+
+        if postgis_error:
+            response["postgis_error"] = postgis_error
+
+        return response
+
+    except HTTPException:
+
+        raise
+
+    except Exception as e:
+
+        print(
+            "Water inference error:",
+            str(e)
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message":
+                    "Water inference failed.",
                 "error":
                     str(e)
             }
