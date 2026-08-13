@@ -19,7 +19,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import psycopg
-from gis_engine.confidence.scoring import compute_confidence
 from export_engine import export_layer
 from gis_engine.vectorization.vectorize import (
     skeletonize_road_mask,
@@ -2245,11 +2244,6 @@ async def building_inference(
         prediction_mean = float(
             prediction.mean()
         )
-        confidence = compute_confidence(
-    prediction_mean=prediction_mean,
-    prediction_min=prediction_min,
-    prediction_max=prediction_max
-)
 
         building_pixels = int(
             mask.sum()
@@ -2455,8 +2449,7 @@ async def building_inference(
                 "prediction_mean":
                     prediction_mean,
 
-                "whole_image_mean_confidence":
-                    confidence
+
             },
 
             "features_stored":
@@ -2684,11 +2677,6 @@ async def road_inference(
         prediction_mean = float(
             pred.mean()
         )
-        confidence = compute_confidence(
-    prediction_mean=prediction_mean,
-    prediction_min=prediction_min,
-    prediction_max=prediction_max
-)
 
         print(
             "Road prediction statistics:"
@@ -3012,8 +3000,7 @@ async def road_inference(
                 "prediction_mean":
                     prediction_mean,
 
-                "whole_image_mean_confidence":
-                    confidence
+
             },
 
             "features_stored":
