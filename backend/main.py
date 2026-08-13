@@ -73,6 +73,9 @@ ALLOWED_LAYERS = {
     "demo_water",
     "demo_lulc",
     "uploaded_buildings",
+    "uploaded_roads",
+    "uploaded_trees",
+    "uploaded_farms",
 }
 
 
