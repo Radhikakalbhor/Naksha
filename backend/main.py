@@ -27,7 +27,7 @@ from gis_engine.vectorization.vectorize import (
     polygonize_mask,
     feature_confidence,
 )
-from shapely.geometry import mapping
+from shapely.geometry import mapping, shape
 from gis_engine.topology.geometry import validate_geometry
 from gis_engine.postgis.export import create_layer_version_sql, create_feature_sql
 
@@ -2298,9 +2298,13 @@ async def road_inference(
                 if line is None or line.is_empty:
                     continue
 
+                validated_line = validate_geometry(line)
+                if validated_line is None:
+                    continue
+
                 road_features.append({
                     "type": "Feature",
-                    "geometry": mapping(line),
+                    "geometry": mapping(validated_line),
                     "properties": {
                         "feature_type": "roads",
                         "confidence": confidence
@@ -2353,6 +2357,53 @@ async def road_inference(
                 "Road GeoJSON saved to:",
                 road_geojson_path
             )
+
+            features_stored = 0
+            layer_version_id = None
+            postgis_status = "skipped"
+            postgis_error = None
+
+            if road_features:
+                try:
+                    print("Storing road features in PostGIS...")
+
+                    with get_postgis_connection() as conn:
+                        with conn.cursor() as cur:
+
+                            cur.execute(
+                                create_layer_version_sql(
+                                    layer_name="uploaded_roads",
+                                    feature_type="roads",
+                                    version=1,
+                                )
+                            )
+                            layer_version_id = cur.fetchone()[0]
+
+                            print(f"Created layer version: {layer_version_id}")
+
+                            for feature in road_features:
+                                geometry = shape(feature["geometry"])
+                                confidence = feature["properties"]["confidence"]
+
+                                cur.execute(
+                                    create_feature_sql(
+                                        layer_version_id=layer_version_id,
+                                        feature_type="roads",
+                                        geometry=geometry,
+                                        confidence=confidence,
+                                    )
+                                )
+                                features_stored += 1
+
+                        conn.commit()
+
+                    postgis_status = "success"
+                    print(f"Stored {features_stored} road features in PostGIS")
+
+                except Exception as e:
+                    postgis_status = "failed"
+                    postgis_error = str(e)
+                    print(f"PostGIS storage failed: {e}")
 
         except Exception as vector_error:
 
@@ -2410,7 +2461,7 @@ async def road_inference(
             output_path
         )
 
-        return {
+        response = {
 
             "status":
                 "success",
@@ -2468,8 +2519,22 @@ async def road_inference(
 
                 "confidence":
                     confidence
-            }
+            },
+
+            "features_stored":
+                features_stored,
+
+            "layer_version_id":
+                layer_version_id,
+
+            "postgis_status":
+                postgis_status,
         }
+
+        if postgis_error:
+            response["postgis_error"] = postgis_error
+
+        return response
     
 
     except HTTPException:
