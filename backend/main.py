@@ -23,9 +23,13 @@ from gis_engine.confidence.scoring import compute_confidence
 from export_engine import export_layer
 from gis_engine.vectorization.vectorize import (
     skeletonize_road_mask,
-    skeleton_to_lines
+    skeleton_to_lines,
+    polygonize_mask,
+    feature_confidence,
 )
 from shapely.geometry import mapping
+from gis_engine.topology.geometry import validate_geometry
+from gis_engine.postgis.export import create_layer_version_sql, create_feature_sql
 
 from deepforest import main as deepforest_main
 
@@ -68,6 +72,7 @@ ALLOWED_LAYERS = {
     "demo_trees",
     "demo_water",
     "demo_lulc",
+    "uploaded_buildings",
 }
 
 
@@ -1676,7 +1681,7 @@ async def building_inference(
         )
 
         # ----------------------------------------------------
-        # Read original image dimensions
+        # Read original image dimensions and transform
         # ----------------------------------------------------
 
         with rasterio.open(
@@ -1692,6 +1697,7 @@ async def building_inference(
 
             original_width = src.width
             original_height = src.height
+            src_transform = src.transform
 
         print(
             "Original image size:",
@@ -1822,10 +1828,80 @@ async def building_inference(
         )
 
         # ----------------------------------------------------
+        # PostGIS: Polygonize mask and store building features
+        # ----------------------------------------------------
+
+        features_stored = 0
+        layer_version_id = None
+        postgis_status = "skipped"
+        postgis_error = None
+
+        try:
+            print("Polygonizing building mask...")
+
+            geometries = polygonize_mask(
+                mask,
+                src_transform,
+                min_area=0.0,
+            )
+
+            print(f"Raw building geometries: {len(geometries)}")
+
+            if geometries:
+                with get_postgis_connection() as conn:
+                    with conn.cursor() as cur:
+
+                        cur.execute(
+                            create_layer_version_sql(
+                                layer_name="uploaded_buildings",
+                                feature_type="buildings",
+                                version=1,
+                            )
+                        )
+                        layer_version_id = cur.fetchone()[0]
+
+                        print(f"Created layer version: {layer_version_id}")
+
+                        for geometry in geometries:
+                            geometry = validate_geometry(geometry)
+
+                            if geometry is None:
+                                continue
+
+                            confidence = feature_confidence(
+                                probability=prediction,
+                                geometry=geometry,
+                                transform=src_transform,
+                            )
+
+                            if confidence is None:
+                                continue
+
+                            cur.execute(
+                                create_feature_sql(
+                                    layer_version_id=layer_version_id,
+                                    feature_type="buildings",
+                                    geometry=geometry,
+                                    confidence=confidence,
+                                )
+                            )
+                            features_stored += 1
+
+                    conn.commit()
+
+                postgis_status = "success"
+                print(f"Stored {features_stored} building features in PostGIS")
+
+        except Exception as e:
+            postgis_status = "failed"
+            postgis_error = str(e)
+            print(f"PostGIS storage failed: {e}")
+
+        # ----------------------------------------------------
         # Return result
         # ----------------------------------------------------
 
-        return {
+        response = {
 
             "status":
                 "success",
@@ -1894,8 +1970,22 @@ async def building_inference(
 
                 "confidence":
                     confidence
-            }
+            },
+
+            "features_stored":
+                features_stored,
+
+            "layer_version_id":
+                layer_version_id,
+
+            "postgis_status":
+                postgis_status,
         }
+
+        if postgis_error:
+            response["postgis_error"] = postgis_error
+
+        return response
 
     except HTTPException:
 
