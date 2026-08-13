@@ -34,6 +34,8 @@ from gis_engine.postgis.export import create_layer_version_sql, create_feature_s
 from deepforest import main as deepforest_main
 
 from water_inference import run_skywater_inference
+from lulc_inference import run_lulc_inference
+from lulc_endpoint import lulc_inference
 
 
 
@@ -55,6 +57,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.post("/inference/lulc")(lulc_inference)
+
 # ============================================================
 # POSTGIS
 # ============================================================
@@ -79,7 +83,9 @@ ALLOWED_LAYERS = {
     "uploaded_trees",
     "uploaded_farms",
     "uploaded_water",
+    "uploaded_lulc",
 }
+
 
 
 def get_postgis_connection():
@@ -216,6 +222,14 @@ WATER_OUTPUT_DIR = (
 )
 
 WATER_OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
+LULC_OUTPUT_DIR = (
+    DATA_DIR / "predictions" / "lulc"
+)
+
+LULC_OUTPUT_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
@@ -1815,6 +1829,7 @@ async def water_inference(
 
     try:
 
+
         # ----------------------------------------------------
         # Save upload
         # ----------------------------------------------------
@@ -3015,7 +3030,7 @@ async def road_inference(
             response["postgis_error"] = postgis_error
 
         return response
-    
+
 
     except HTTPException:
 
