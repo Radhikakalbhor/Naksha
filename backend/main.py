@@ -1193,6 +1193,76 @@ override: null
                 )
             )
 
+        features_stored = 0
+        layer_version_id = None
+        postgis_status = "skipped"
+        postgis_error = None
+
+        gpkg_to_read = (
+            simplified_gpkg_path
+            if simplified_gpkg_path.exists()
+            else gpkg_path
+        )
+
+        try:
+            import geopandas as gpd
+
+            print(f"Reading field geometries from: {gpkg_to_read}")
+            gdf = gpd.read_file(gpkg_to_read)
+
+            if len(gdf) > 0:
+                print("Storing field features in PostGIS...")
+
+                with get_postgis_connection() as conn:
+                    with conn.cursor() as cur:
+
+                        cur.execute(
+                            create_layer_version_sql(
+                                layer_name="uploaded_farms",
+                                feature_type="farms",
+                                version=1,
+                            )
+                        )
+                        layer_version_id = cur.fetchone()[0]
+
+                        print(f"Created layer version: {layer_version_id}")
+
+                        for _, row in gdf.iterrows():
+                            geometry = row.geometry
+
+                            if geometry is None or geometry.is_empty:
+                                continue
+
+                            validated_geometry = validate_geometry(geometry)
+
+                            if validated_geometry is None:
+                                continue
+
+                            cur.execute(
+                                create_feature_sql(
+                                    layer_version_id=layer_version_id,
+                                    feature_type="farms",
+                                    geometry=validated_geometry,
+                                    confidence=None,
+                                )
+                            )
+                            features_stored += 1
+
+                    conn.commit()
+
+                postgis_status = "success"
+                print(f"Stored {features_stored} field features in PostGIS")
+
+        except ImportError:
+            postgis_status = "skipped"
+            postgis_error = "geopandas not available"
+            print("geopandas not available, skipping PostGIS storage")
+
+        except Exception as e:
+            postgis_status = "failed"
+            postgis_error = str(e)
+            print(f"PostGIS storage failed: {e}")
+
         return {
 
             "status": "success",
@@ -1215,7 +1285,11 @@ override: null
                         if simplified_gpkg_path.exists()
                         else None
                     )
-            }
+            },
+            "features_stored": features_stored,
+            "layer_version_id": layer_version_id,
+            "postgis_status": postgis_status,
+            "confidence_available": False,
         }
 
     except HTTPException:
@@ -1550,7 +1624,59 @@ async def tree_inference(
             for feature in features
         ]
 
-        return {
+        features_stored = 0
+        layer_version_id = None
+        postgis_status = "skipped"
+        postgis_error = None
+
+        if features:
+            try:
+                print("Storing tree features in PostGIS...")
+
+                with get_postgis_connection() as conn:
+                    with conn.cursor() as cur:
+
+                        cur.execute(
+                            create_layer_version_sql(
+                                layer_name="uploaded_trees",
+                                feature_type="trees",
+                                version=1,
+                            )
+                        )
+                        layer_version_id = cur.fetchone()[0]
+
+                        print(f"Created layer version: {layer_version_id}")
+
+                        for feature in features:
+                            geometry = shape(feature["geometry"])
+                            validated_geometry = validate_geometry(geometry)
+
+                            if validated_geometry is None:
+                                continue
+
+                            confidence = feature["properties"]["confidence"]
+
+                            cur.execute(
+                                create_feature_sql(
+                                    layer_version_id=layer_version_id,
+                                    feature_type="trees",
+                                    geometry=validated_geometry,
+                                    confidence=confidence,
+                                )
+                            )
+                            features_stored += 1
+
+                    conn.commit()
+
+                postgis_status = "success"
+                print(f"Stored {features_stored} tree features in PostGIS")
+
+            except Exception as e:
+                postgis_status = "failed"
+                postgis_error = str(e)
+                print(f"PostGIS storage failed: {e}")
+
+        response = {
             "status": "success",
             "job_id": job_id,
             "input_file": file.filename,
@@ -1570,8 +1696,16 @@ async def tree_inference(
                 "confidence_max": max(
                     confidence_values
                 )
-            }
+            },
+            "features_stored": features_stored,
+            "layer_version_id": layer_version_id,
+            "postgis_status": postgis_status,
         }
+
+        if postgis_error:
+            response["postgis_error"] = postgis_error
+
+        return response
 
     except HTTPException:
 
