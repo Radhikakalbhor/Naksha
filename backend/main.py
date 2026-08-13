@@ -2102,7 +2102,7 @@ async def building_inference(
                 "prediction_mean":
                     prediction_mean,
 
-                "confidence":
+                "whole_image_mean_confidence":
                     confidence
             },
 
@@ -2393,13 +2393,12 @@ async def road_inference(
             interpolation=cv2.INTER_NEAREST
         )
 
-        # ----------------------------------------------------
-    # ----------------------------------------------------
-    # ----------------------------------------------------
-    # Statistics
-    # ----------------------------------------------------
+        pred_resized = cv2.resize(
+            pred,
+            (original_width, original_height),
+            interpolation=cv2.INTER_LINEAR
+        )
 
-    # ----------------------------------------------------
         # ROAD MASK -> CENTERLINE VECTORIZATION
         # ----------------------------------------------------
 
@@ -2436,12 +2435,21 @@ async def road_inference(
                 if validated_line is None:
                     continue
 
+                road_confidence = feature_confidence(
+                    probability=pred_resized,
+                    geometry=validated_line,
+                    transform=road_src.transform,
+                )
+
+                if road_confidence is None:
+                    continue
+
                 road_features.append({
                     "type": "Feature",
                     "geometry": mapping(validated_line),
                     "properties": {
                         "feature_type": "roads",
-                        "confidence": confidence
+                        "confidence": road_confidence
                     }
                 })
 
@@ -2651,7 +2659,7 @@ async def road_inference(
                 "prediction_mean":
                     prediction_mean,
 
-                "confidence":
+                "whole_image_mean_confidence":
                     confidence
             },
 
