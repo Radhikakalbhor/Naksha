@@ -34,7 +34,7 @@ from deepforest import main as deepforest_main
 
 from water_inference import run_skywater_inference
 from lulc_inference import run_lulc_inference
-from lulc_endpoint import lulc_inference
+from lulc_endpoint import router as lulc_router
 
 
 
@@ -56,7 +56,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.post("/inference/lulc")(lulc_inference)
+app.include_router(lulc_router)
 
 # ============================================================
 # POSTGIS

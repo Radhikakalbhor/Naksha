@@ -4,7 +4,13 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import (
+    APIRouter,
+    UploadFile,
+    File,
+    HTTPException,
+)
+from fastapi.responses import FileResponse
 
 from lulc_inference import run_lulc_inference
 from gis_engine.vectorization.vectorize import (
@@ -375,4 +381,27 @@ async def lulc_inference(
                 "message": "LULC inference failed.",
                 "error": str(exc),
             },
+
         )
+
+
+@router.get("/inference/lulc/{job_id}/raster")
+async def download_lulc_raster(
+    job_id: str,
+):
+    raster_path = (
+        LULC_OUTPUT_DIR
+        / f"Naksha_{job_id}_lulc.tif"
+    )
+
+    if not raster_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="LULC raster not found.",
+        )
+
+    return FileResponse(
+        path=str(raster_path),
+        media_type="image/tiff",
+        filename=raster_path.name,
+    )
