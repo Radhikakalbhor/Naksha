@@ -1,3 +1,4 @@
+import os
 import shutil
 import uuid
 from pathlib import Path
@@ -27,9 +28,10 @@ from gis_engine.postgis.export import (
 router = APIRouter()
 
 
-LULC_OUTPUT_DIR = Path(
-    "/data/predictions/lulc"
-)
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path("/data") if Path("/data").exists() else BASE_DIR / "data"
+
+LULC_OUTPUT_DIR = DATA_DIR / "predictions" / "lulc"
 
 LULC_OUTPUT_DIR.mkdir(
     parents=True,
@@ -52,11 +54,11 @@ def get_postgis_connection():
     import psycopg
 
     return psycopg.connect(
-        host="naksha-postgres",
-        dbname="naksha",
-        user="naksha",
-        password="naksha_dev",
-        port=5432,
+        host=os.getenv("POSTGRES_HOST", "naksha-postgres"),
+        dbname=os.getenv("POSTGRES_DB", "naksha"),
+        user=os.getenv("POSTGRES_USER", "naksha"),
+        password=os.getenv("POSTGRES_PASSWORD", "naksha_dev"),
+        port=int(os.getenv("POSTGRES_PORT", "5432")),
     )
 
 

@@ -3,6 +3,7 @@
 # ============================================================
 
 import os
+import sys
 import json
 import uuid
 import shutil
@@ -112,10 +113,10 @@ print("Naksha device:", DEVICE)
 # BASE DIRECTORIES
 # ============================================================
 
-BASE_DIR = Path("/app")
+BASE_DIR = Path(__file__).resolve().parent
 
 MODELS_DIR = BASE_DIR / "models"
-DATA_DIR = BASE_DIR / "data"
+DATA_DIR = Path("/data") if Path("/data").exists() else BASE_DIR / "data"
 
 
 # ============================================================
@@ -883,46 +884,55 @@ def health():
 @app.get("/layers")
 def list_layers():
 
-    with get_postgis_connection() as conn:
+    try:
+        with get_postgis_connection() as conn:
 
-        with conn.cursor() as cur:
+            with conn.cursor() as cur:
 
-            cur.execute(
-                """
-                SELECT
-                    lv.id,
-                    lv.layer_name,
-                    lv.feature_type,
-                    lv.version,
-                    COUNT(vf.id) AS feature_count
-                FROM layer_versions lv
-                LEFT JOIN vector_features vf
-                    ON vf.layer_version_id = lv.id
-                WHERE lv.layer_name = ANY(%s)
-                GROUP BY
-                    lv.id,
-                    lv.layer_name,
-                    lv.feature_type,
-                    lv.version
-                ORDER BY lv.id;
-                """,
-                (list(ALLOWED_LAYERS),),
-            )
+                cur.execute(
+                    """
+                    SELECT
+                        lv.id,
+                        lv.layer_name,
+                        lv.feature_type,
+                        lv.version,
+                        COUNT(vf.id) AS feature_count
+                    FROM layer_versions lv
+                    LEFT JOIN vector_features vf
+                        ON vf.layer_version_id = lv.id
+                    WHERE lv.layer_name = ANY(%s)
+                    GROUP BY
+                        lv.id,
+                        lv.layer_name,
+                        lv.feature_type,
+                        lv.version
+                    ORDER BY lv.id;
+                    """,
+                    (list(ALLOWED_LAYERS),),
+                )
 
-            rows = cur.fetchall()
+                rows = cur.fetchall()
 
-    return {
-        "layers": [
-            {
-                "id": row[0],
-                "layer_name": row[1],
-                "feature_type": row[2],
-                "version": row[3],
-                "feature_count": row[4],
-            }
-            for row in rows
-        ]
-    }
+        return {
+            "layers": [
+                {
+                    "id": row[0],
+                    "layer_name": row[1],
+                    "feature_type": row[2],
+                    "version": row[3],
+                    "feature_count": row[4],
+                }
+                for row in rows
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to retrieve layers from PostGIS.",
+                "error": str(e),
+            },
+        )
 
 
 @app.get("/layers/{layer_name}")
@@ -934,43 +944,52 @@ def get_layer(layer_name: str):
             detail="Layer not found.",
         )
 
-    with get_postgis_connection() as conn:
+    try:
+        with get_postgis_connection() as conn:
 
-        with conn.cursor() as cur:
+            with conn.cursor() as cur:
 
-            cur.execute(
-                """
-                SELECT
-                    vf.id,
-                    vf.feature_type,
-                    vf.confidence,
-                    ST_AsGeoJSON(vf.geometry)
-                FROM vector_features vf
-                JOIN layer_versions lv
-                    ON lv.id = vf.layer_version_id
-                WHERE lv.layer_name = %s
-                ORDER BY vf.id;
-                """,
-                (layer_name,),
-            )
+                cur.execute(
+                    """
+                    SELECT
+                        vf.id,
+                        vf.feature_type,
+                        vf.confidence,
+                        ST_AsGeoJSON(vf.geometry)
+                    FROM vector_features vf
+                    JOIN layer_versions lv
+                        ON lv.id = vf.layer_version_id
+                    WHERE lv.layer_name = %s
+                    ORDER BY vf.id;
+                    """,
+                    (layer_name,),
+                )
 
-            rows = cur.fetchall()
+                rows = cur.fetchall()
 
-    return {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "id": row[0],
-                "geometry": json.loads(row[3]),
-                "properties": {
-                    "feature_type": row[1],
-                    "confidence": row[2],
-                },
-            }
-            for row in rows
-        ],
-    }
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": row[0],
+                    "geometry": json.loads(row[3]),
+                    "properties": {
+                        "feature_type": row[1],
+                        "confidence": row[2],
+                    },
+                }
+                for row in rows
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Failed to retrieve layer features from PostGIS.",
+                "error": str(e),
+            },
+        )
 # ============================================================
 # DAY 6 - VECTOR LAYER EXPORT
 # ============================================================
@@ -1170,7 +1189,7 @@ override: null
 
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "delineate.py",
                 "-b",
                 str(FIELD_BATCH_CONFIG)
@@ -1245,10 +1264,19 @@ override: null
                     with conn.cursor() as cur:
 
                         cur.execute(
+                            """
+                            SELECT COALESCE(MAX(version), 0) + 1
+                            FROM layer_versions
+                            WHERE layer_name = 'uploaded_farms'
+                            """
+                        )
+                        next_version = cur.fetchone()[0]
+
+                        cur.execute(
                             create_layer_version_sql(
                                 layer_name="uploaded_farms",
                                 feature_type="farms",
-                                version=1,
+                                version=next_version,
                             )
                         )
                         layer_version_id = cur.fetchone()[0]
@@ -1351,6 +1379,12 @@ def field_result(
         FIELD_OUTPUT_DIR /
         f"{job_name}.simp.gpkg"
     )
+
+    if not gpkg_path.exists():
+        gpkg_path = (
+            FIELD_OUTPUT_DIR /
+            f"{job_name}.gpkg"
+        )
 
     if not gpkg_path.exists():
 
@@ -1665,10 +1699,19 @@ async def tree_inference(
                     with conn.cursor() as cur:
 
                         cur.execute(
+                            """
+                            SELECT COALESCE(MAX(version), 0) + 1
+                            FROM layer_versions
+                            WHERE layer_name = 'uploaded_trees'
+                            """
+                        )
+                        next_version = cur.fetchone()[0]
+
+                        cur.execute(
                             create_layer_version_sql(
                                 layer_name="uploaded_trees",
                                 feature_type="trees",
-                                version=1,
+                                version=next_version,
                             )
                         )
                         layer_version_id = cur.fetchone()[0]
@@ -1716,14 +1759,14 @@ async def tree_inference(
                 "tree_count": tree_count,
                 "confidence_min": min(
                     confidence_values
-                ),
+                ) if confidence_values else 0.0,
                 "confidence_mean": (
                     sum(confidence_values)
                     / len(confidence_values)
-                ),
+                ) if confidence_values else 0.0,
                 "confidence_max": max(
                     confidence_values
-                )
+                ) if confidence_values else 0.0,
             },
             "features_stored": features_stored,
             "layer_version_id": layer_version_id,
@@ -1942,10 +1985,19 @@ async def water_inference(
                     with conn.cursor() as cur:
 
                         cur.execute(
+                            """
+                            SELECT COALESCE(MAX(version), 0) + 1
+                            FROM layer_versions
+                            WHERE layer_name = 'uploaded_water'
+                            """
+                        )
+                        next_version = cur.fetchone()[0]
+
+                        cur.execute(
                             create_layer_version_sql(
                                 layer_name="uploaded_water",
                                 feature_type="water",
-                                version=1,
+                                version=next_version,
                             )
                         )
                         layer_version_id = cur.fetchone()[0]
@@ -2331,12 +2383,20 @@ async def building_inference(
             if geometries:
                 with get_postgis_connection() as conn:
                     with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT COALESCE(MAX(version), 0) + 1
+                            FROM layer_versions
+                            WHERE layer_name = 'uploaded_buildings'
+                            """
+                        )
+                        next_version = cur.fetchone()[0]
 
                         cur.execute(
                             create_layer_version_sql(
                                 layer_name="uploaded_buildings",
                                 feature_type="buildings",
-                                version=1,
+                                version=next_version,
                             )
                         )
                         layer_version_id = cur.fetchone()[0]
@@ -2854,10 +2914,19 @@ async def road_inference(
                         with conn.cursor() as cur:
 
                             cur.execute(
+                                """
+                                SELECT COALESCE(MAX(version), 0) + 1
+                                FROM layer_versions
+                                WHERE layer_name = 'uploaded_roads'
+                                """
+                            )
+                            next_version = cur.fetchone()[0]
+
+                            cur.execute(
                                 create_layer_version_sql(
                                     layer_name="uploaded_roads",
                                     feature_type="roads",
-                                    version=1,
+                                    version=next_version,
                                 )
                             )
                             layer_version_id = cur.fetchone()[0]

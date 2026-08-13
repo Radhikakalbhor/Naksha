@@ -135,9 +135,10 @@ def run_ogr2ogr(
         "features",
         "-nlt",
         "PROMOTE_TO_MULTI",
-        "-lco",
-        "GEOMETRY_NAME=geometry",
     ]
+
+    if driver in ("GPKG", "GeoJSON"):
+        command.extend(["-lco", "GEOMETRY_NAME=geometry"])
 
     result = subprocess.run(
         command,
@@ -207,6 +208,11 @@ def export_layer(
         conn,
         layer_name,
     )
+
+    if not geojson.get("features"):
+        raise ValueError(
+            f"Layer '{layer_name}' has no features to export."
+        )
 
     with tempfile.TemporaryDirectory(
         dir=str(output_dir)
@@ -313,8 +319,8 @@ def export_layer(
             )
 
             zip_base = (
-                output_dir /
-                layer_name
+                temp_path /
+                f"{layer_name}_filegdb"
             )
 
             zip_path = (
@@ -329,16 +335,15 @@ def export_layer(
                 base_dir=gdb_dir.name,
             )
 
-            # make_archive creates <base>.zip
             generated_zip = (
-                output_dir /
-                f"{layer_name}.zip"
+                temp_path /
+                f"{layer_name}_filegdb.zip"
             )
 
             if generated_zip.exists():
-
-                generated_zip.replace(
-                    zip_path
+                shutil.move(
+                    str(generated_zip),
+                    str(zip_path),
                 )
 
             return (

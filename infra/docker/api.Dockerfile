@@ -32,7 +32,9 @@ RUN pip install --no-cache-dir \
     ultralytics==8.3.148 \
     numba==0.62.1 \
     deepforest==2.1.0 \
-    scikit-image==0.26.0
+    scikit-image==0.26.0 \
+    transformers \
+    geopandas
 
 WORKDIR /app
 

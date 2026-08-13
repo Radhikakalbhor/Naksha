@@ -56,10 +56,10 @@ services:
     working_dir: /app
     volumes:
       - ../../backend:/app
-      - ../../gis_engine:/app/gis_engine
-      - ../../data:/data
       - ../../water_inference.py:/app/water_inference.py:ro
       - ../../lulc_inference.py:/app/lulc_inference.py:ro
+      - ../../gis_engine:/app/gis_engine
+      - ../../data:/data
     command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
