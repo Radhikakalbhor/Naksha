@@ -3,6 +3,8 @@
 # Day 5 - Geometry validation + simplification
 # ============================================================
 
+import shapely
+import shapely.validation
 from shapely.geometry.base import BaseGeometry
 
 
@@ -20,9 +22,14 @@ def validate_geometry(
         return None
 
     if not geometry.is_valid:
-        geometry = geometry.make_valid()
+        if hasattr(geometry, "make_valid"):
+            geometry = geometry.make_valid()
+        elif hasattr(shapely, "make_valid"):
+            geometry = shapely.make_valid(geometry)
+        else:
+            geometry = shapely.validation.make_valid(geometry)
 
-    if geometry.is_empty:
+    if geometry is None or geometry.is_empty:
         return None
 
     return geometry

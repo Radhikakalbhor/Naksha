@@ -34,7 +34,9 @@ RUN pip install --no-cache-dir \
     deepforest==2.1.0 \
     scikit-image==0.26.0 \
     transformers \
-    geopandas
+    geopandas \
+    celery \
+    redis
 
 WORKDIR /app
 

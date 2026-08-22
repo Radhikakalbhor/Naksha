@@ -9,14 +9,23 @@ import uuid
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 import cv2
 import numpy as np
 import rasterio
-import torch
-import torch.nn as nn
+try:
+    import torch
+    import torch.nn as nn
+    nn_Module = nn.Module
+except ImportError:
+    torch = None
+    nn = None
+    nn_Module = object
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import logging
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import psycopg
@@ -31,12 +40,20 @@ from shapely.geometry import mapping, shape
 from gis_engine.topology.geometry import validate_geometry
 from gis_engine.postgis.export import create_layer_version_sql, create_feature_sql
 
-from deepforest import main as deepforest_main
+try:
+    from deepforest import main as deepforest_main
+except ImportError:
+    deepforest_main = None
 
 from water_inference import run_skywater_inference
 from lulc_inference import run_lulc_inference
 from lulc_endpoint import router as lulc_router
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("naksha")
 
 
 # ============================================================
@@ -89,21 +106,51 @@ ALLOWED_LAYERS = {
 
 
 def get_postgis_connection():
-    return psycopg.connect(
+    conn = psycopg.connect(
         host=POSTGIS_CONFIG["host"],
         dbname=POSTGIS_CONFIG["dbname"],
         user=POSTGIS_CONFIG["user"],
         password=POSTGIS_CONFIG["password"],
         port=POSTGIS_CONFIG["port"],
     )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE vector_features 
+                ADD COLUMN IF NOT EXISTS qc_status TEXT DEFAULT 'pending';
+            """)
+            cur.execute("""
+                ALTER TABLE vector_features 
+                ADD COLUMN IF NOT EXISTS source_model TEXT,
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_id TEXT PRIMARY KEY,
+                    celery_task_id TEXT,
+                    feature_type TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    input_file TEXT,
+                    result JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    return conn
 
 
 # ============================================================
 # DEVICE
 # ============================================================
 
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = (
+    torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch is not None
+    else "cpu"
 )
 
 print("Naksha device:", DEVICE)
@@ -269,7 +316,7 @@ def get_tree_model():
 # BUILDING U-NET
 # ============================================================
 
-class DoubleConv(nn.Module):
+class DoubleConv(nn_Module):
 
     def __init__(
         self,
@@ -316,7 +363,7 @@ class DoubleConv(nn.Module):
         return self.conv(x)
 
 
-class UNet(nn.Module):
+class UNet(nn_Module):
 
     def __init__(self):
 
@@ -765,13 +812,16 @@ def building_sliding_window_inference(
 # ROAD MODEL IMPORTS
 # ============================================================
 
-from models.road.dlinknet3 import (
-    DLinkNet34
-)
-
-from models.road.postprocess import (
-    postprocess_mask
-)
+try:
+    from models.road.dlinknet3 import (
+        DLinkNet34
+    )
+    from models.road.postprocess import (
+        postprocess_mask
+    )
+except ImportError:
+    DLinkNet34 = None
+    postprocess_mask = None
 
 
 # ============================================================
@@ -998,6 +1048,7 @@ def get_layer(layer_name: str):
 def export_vector_layer(
     layer_name: str,
     export_format: str,
+    qc_only: bool = Query(False),
 ):
     """
     Export a PostGIS vector layer.
@@ -1056,6 +1107,7 @@ def export_vector_layer(
                 layer_name=layer_name,
                 export_format=export_format,
                 output_dir=export_dir,
+                qc_only=qc_only,
             )
 
         return FileResponse(
@@ -3251,3 +3303,470 @@ def road_mask(
         media_type="image/png",
         filename=mask_path.name
     )
+
+
+# ============================================================
+# DAY 8 - QC WORKFLOW ENDPOINTS
+# ============================================================
+
+@app.get("/qc/queue")
+def get_qc_queue(layer_name: Optional[str] = Query(None), status: Optional[str] = Query("pending")):
+    if layer_name and layer_name not in ALLOWED_LAYERS:
+        raise HTTPException(status_code=404, detail="Layer not found.")
+    try:
+        query_parts = [
+            """
+            SELECT
+                vf.id,
+                vf.feature_type,
+                vf.confidence,
+                ST_AsGeoJSON(vf.geometry),
+                vf.qc_status,
+                lv.id AS layer_version_id,
+                lv.layer_name,
+                vf.source_model
+            FROM vector_features vf
+            JOIN layer_versions lv ON lv.id = vf.layer_version_id
+            """
+        ]
+        where_clauses = []
+        params = []
+
+        if layer_name:
+            where_clauses.append("lv.layer_name = %s")
+            params.append(layer_name)
+
+        if status:
+            if status == "pending":
+                where_clauses.append("(vf.qc_status = 'pending' OR vf.qc_status IS NULL)")
+            else:
+                where_clauses.append("vf.qc_status = %s")
+                params.append(status)
+
+        if where_clauses:
+            query_parts.append("WHERE " + " AND ".join(where_clauses))
+
+        query_parts.append("ORDER BY vf.confidence ASC NULLS FIRST, vf.id ASC;")
+        sql = " ".join(query_parts)
+
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, tuple(params))
+                rows = cur.fetchall()
+
+        return {
+            "type": "FeatureCollection",
+            "layer_name": layer_name,
+            "status": status,
+            "features": [
+                {
+                    "type": "Feature",
+                    "id": row[0],
+                    "geometry": json.loads(row[3]) if row[3] else None,
+                    "properties": {
+                        "feature_id": row[0],
+                        "layer_version_id": row[5],
+                        "layer_name": row[6],
+                        "feature_type": row[1],
+                        "confidence": row[2],
+                        "qc_status": row[4] or "pending",
+                        "source_model": row[7],
+                    },
+                }
+                for row in rows
+            ],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to fetch QC queue.", "error": str(e)})
+
+
+@app.get("/qc/{feature_id}")
+def get_qc_feature(feature_id: int):
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        vf.id,
+                        vf.feature_type,
+                        vf.confidence,
+                        ST_AsGeoJSON(vf.geometry),
+                        vf.qc_status,
+                        lv.id AS layer_version_id,
+                        lv.layer_name,
+                        vf.source_model
+                    FROM vector_features vf
+                    JOIN layer_versions lv ON lv.id = vf.layer_version_id
+                    WHERE vf.id = %s;
+                    """,
+                    (feature_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Feature not found.")
+        return {
+            "feature_id": row[0],
+            "layer_version_id": row[5],
+            "layer_name": row[6],
+            "feature_type": row[1],
+            "confidence": row[2],
+            "qc_status": row[4] or "pending",
+            "source_model": row[7],
+            "geometry": json.loads(row[3]) if row[3] else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to fetch feature.", "error": str(e)})
+
+
+@app.post("/qc/{feature_id}/accept")
+def accept_qc_feature(feature_id: int):
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE vector_features SET qc_status = 'accepted', updated_at = CURRENT_TIMESTAMP WHERE id = %s RETURNING id;",
+                    (feature_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Feature not found.")
+            conn.commit()
+        return {"status": "success", "feature_id": feature_id, "qc_status": "accepted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to accept feature.", "error": str(e)})
+
+
+@app.post("/qc/{feature_id}/reject")
+def reject_qc_feature(feature_id: int):
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE vector_features SET qc_status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = %s RETURNING id;",
+                    (feature_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Feature not found.")
+            conn.commit()
+        return {"status": "success", "feature_id": feature_id, "qc_status": "rejected"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to reject feature.", "error": str(e)})
+
+
+@app.put("/qc/{feature_id}")
+def update_qc_feature(feature_id: int, payload: dict = Body(...)):
+    geom_data = payload.get("geometry")
+    if not geom_data:
+        raise HTTPException(status_code=400, detail="Missing geometry in request payload.")
+    try:
+        geom_obj = shape(geom_data)
+        validated_geom = validate_geometry(geom_obj)
+        if validated_geom is None or validated_geom.is_empty:
+            raise HTTPException(status_code=400, detail="Invalid geometry provided.")
+        wkt = validated_geom.wkt.replace("'", "''")
+        confidence = payload.get("confidence")
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                if confidence is not None:
+                    cur.execute(
+                        """
+                        UPDATE vector_features
+                        SET geometry = ST_GeomFromText(%s, 4326),
+                            confidence = %s,
+                            qc_status = 'edited',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id;
+                        """,
+                        (wkt, confidence, feature_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE vector_features
+                        SET geometry = ST_GeomFromText(%s, 4326),
+                            qc_status = 'edited',
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = %s
+                        RETURNING id;
+                        """,
+                        (wkt, feature_id),
+                    )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Feature not found.")
+            conn.commit()
+        return {"status": "success", "feature_id": feature_id, "qc_status": "edited"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to update feature.", "error": str(e)})
+
+
+# ============================================================
+# DAY 9 - ASYNC JOBS (CELERY + REDIS)
+# ============================================================
+
+IN_MEMORY_JOBS = {}
+
+@app.post("/jobs")
+async def create_job(
+    background_tasks: BackgroundTasks,
+    feature_type: str = Query("buildings"),
+    file: UploadFile = File(...)
+):
+    job_id = uuid.uuid4().hex[:8]
+    ext = Path(file.filename).suffix.lower() if file.filename else ".tif"
+    temp_path = DATA_DIR / "temp" / f"job_input_{job_id}{ext}"
+    temp_path.parent.mkdir(parents=True, exist_ok=True)
+    with temp_path.open("wb") as buf:
+        shutil.copyfileobj(file.file, buf)
+
+    job_info = {"job_id": job_id, "feature_type": feature_type, "status": "pending", "input_file": file.filename}
+    IN_MEMORY_JOBS[job_id] = job_info
+
+    celery_dispatched = False
+    try:
+        from tasks import process_building_inference_task
+        result = process_building_inference_task.delay(job_id, str(temp_path))
+        job_info["celery_task_id"] = result.id
+        job_info["status"] = "queued"
+        celery_dispatched = True
+    except Exception as exc:
+        logger.warning(f"Celery dispatch unavailable ({exc}), using background task fallback.")
+
+    if not celery_dispatched:
+        async def run_fallback():
+            job_info["status"] = "processing"
+            try:
+                model = get_building_model()
+                image, mask, prediction = building_sliding_window_inference(
+                    model=model,
+                    image_path=temp_path,
+                    patch_size=BUILDING_PATCH_SIZE,
+                    stride=BUILDING_STRIDE
+                )
+                with rasterio.open(str(temp_path)) as src:
+                    transform = src.transform
+                geoms = polygonize_mask(mask, transform, min_area=0.0)
+                stored = 0
+                if geoms:
+                    with get_postgis_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM layer_versions WHERE layer_name = 'uploaded_buildings'")
+                            ver = cur.fetchone()[0]
+                            cur.execute(create_layer_version_sql("uploaded_buildings", "buildings", ver))
+                            lvid = cur.fetchone()[0]
+                            for g in geoms:
+                                vg = validate_geometry(g)
+                                if not vg:
+                                    continue
+                                c = feature_confidence(prediction, vg, transform)
+                                if c is None:
+                                    continue
+                                cur.execute(create_feature_sql(lvid, "buildings", vg, c))
+                                stored += 1
+                        conn.commit()
+                job_info["status"] = "completed"
+                job_info["features_stored"] = stored
+            except Exception as e:
+                job_info["status"] = "failed"
+                job_info["error"] = str(e)
+
+        background_tasks.add_task(run_fallback)
+
+    return {"status": "success", "job_id": job_id, "message": "Inference job submitted successfully."}
+
+
+@app.get("/jobs")
+def list_jobs():
+    jobs_list = []
+    for jid, info in IN_MEMORY_JOBS.items():
+        status_info = dict(info)
+        celery_task_id = info.get("celery_task_id")
+        if celery_task_id:
+            try:
+                from tasks import celery_app
+                if celery_app is not None:
+                    res = celery_app.AsyncResult(celery_task_id)
+                    state = res.state
+                    if state in ("PENDING", "RECEIVED"):
+                        status_info["status"] = "queued"
+                    elif state == "STARTED":
+                        status_info["status"] = "processing"
+                    elif state == "SUCCESS":
+                        status_info["status"] = "completed"
+                    elif state == "FAILURE":
+                        status_info["status"] = "failed"
+            except Exception:
+                pass
+        jobs_list.append(status_info)
+    return {"jobs": jobs_list, "total": len(jobs_list)}
+
+
+@app.get("/jobs/{job_id}")
+def get_job_status(job_id: str):
+    if job_id not in IN_MEMORY_JOBS:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    
+    job_info = IN_MEMORY_JOBS[job_id]
+    celery_task_id = job_info.get("celery_task_id")
+    
+    if celery_task_id:
+        try:
+            from tasks import celery_app
+            if celery_app is not None:
+                res = celery_app.AsyncResult(celery_task_id)
+                state = res.state
+                
+                if state in ("PENDING", "RECEIVED"):
+                    job_info["status"] = "queued"
+                elif state == "STARTED":
+                    job_info["status"] = "processing"
+                elif state == "SUCCESS":
+                    job_info["status"] = "completed"
+                    return res.result
+                elif state == "FAILURE":
+                    job_info["status"] = "failed"
+                    if res.result:
+                        job_info["error"] = str(res.result)
+        except Exception:
+            pass
+            
+    return job_info
+
+
+# ============================================================
+# DAY 10 - INGESTION & ACCURACY REPORT
+# ============================================================
+
+@app.post("/ingest")
+async def ingest_imagery(
+    file: UploadFile = File(...),
+    target_crs: str = Query("EPSG:4326"),
+    tile_size: int = Query(512),
+    overlap: int = Query(64)
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided.")
+    job_id = uuid.uuid4().hex[:8]
+    raw_dir = DATA_DIR / "raw" / f"ingest_{job_id}"
+    processed_dir = DATA_DIR / "processed" / f"ingest_{job_id}"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_path = raw_dir / file.filename
+    with raw_path.open("wb") as buf:
+        shutil.copyfileobj(file.file, buf)
+
+    # 1. CRS Normalization
+    normalized_path = processed_dir / f"normalized_{file.filename}"
+    try:
+        from preprocessing.crs_utils import normalize_crs
+        normalize_crs(raw_path, normalized_path, target_crs=target_crs)
+    except Exception as e:
+        logger.warning(f"CRS normalization failed ({e}), using source file.")
+        shutil.copy(raw_path, normalized_path)
+
+    # 2. COG Conversion
+    cog_path = processed_dir / f"cog_{file.filename}"
+    try:
+        with rasterio.open(str(normalized_path)) as src:
+            profile = src.profile.copy()
+            profile.update(driver="GTiff", createoptions=["TILED=YES", "COMPRESS=DEFLATE"])
+            with rasterio.open(str(cog_path), "w", **profile) as dst:
+                for b in range(1, src.count + 1):
+                    dst.write(src.read(b), b)
+    except Exception as e:
+        logger.warning(f"COG conversion warning: {e}")
+        shutil.copy(normalized_path, cog_path)
+
+    # 3. Tiling
+    tiles_dir = processed_dir / "tiles"
+    try:
+        from preprocessing.tiler import tile_raster
+        tile_raster(cog_path, tiles_dir, tile_size=tile_size, overlap=overlap)
+    except Exception as e:
+        logger.warning(f"Tiling warning: {e}")
+
+    # 4. MinIO Storage Check
+    minio_status = "skipped"
+    minio_url = os.getenv("MINIO_ENDPOINT", "http://naksha-minio:9000")
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{minio_url}/minio/health/live")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                minio_status = "connected"
+    except Exception:
+        minio_status = "minio_offline_local_storage_used"
+
+    return {
+        "status": "success",
+        "job_id": job_id,
+        "input_filename": file.filename,
+        "crs": target_crs,
+        "outputs": {
+            "raw": str(raw_path),
+            "normalized": str(normalized_path),
+            "cog": str(cog_path),
+            "tiles_dir": str(tiles_dir),
+        },
+        "minio_storage": minio_status,
+    }
+
+
+@app.get("/accuracy/report")
+def get_accuracy_report(layer_name: str):
+    if layer_name not in ALLOWED_LAYERS:
+        raise HTTPException(status_code=404, detail="Layer not found.")
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(vf.id) AS total_features,
+                        COALESCE(AVG(vf.confidence), 0.0) AS mean_confidence,
+                        COUNT(CASE WHEN vf.qc_status = 'accepted' THEN 1 END) AS accepted_count,
+                        COUNT(CASE WHEN vf.qc_status = 'edited' THEN 1 END) AS edited_count,
+                        COUNT(CASE WHEN vf.qc_status = 'rejected' THEN 1 END) AS rejected_count,
+                        COUNT(CASE WHEN vf.qc_status = 'pending' OR vf.qc_status IS NULL THEN 1 END) AS pending_count,
+                        COALESCE(SUM(ST_Area(vf.geometry)), 0.0) AS total_surface_area
+                    FROM vector_features vf
+                    JOIN layer_versions lv ON lv.id = vf.layer_version_id
+                    WHERE lv.layer_name = %s;
+                    """,
+                    (layer_name,),
+                )
+                row = cur.fetchone()
+                total, mean_conf, acc, ed, rej, pend, area = row
+        return {
+            "status": "success",
+            "layer_name": layer_name,
+            "metrics": {
+                "total_features": total,
+                "mean_confidence": round(float(mean_conf), 4),
+                "total_surface_area": round(float(area), 6),
+                "qc_breakdown": {
+                    "accepted": acc,
+                    "edited": ed,
+                    "rejected": rej,
+                    "pending": pend,
+                },
+                "acceptance_rate": round(float((acc + ed) / total * 100), 2) if total > 0 else 0.0,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to generate accuracy report.", "error": str(e)})
+

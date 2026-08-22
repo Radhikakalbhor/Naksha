@@ -37,6 +37,8 @@ def create_feature_sql(
     feature_type: str,
     geometry: BaseGeometry,
     confidence: float | None = None,
+    qc_status: str = "pending",
+    source_model: str | None = None,
 ) -> str:
     """
     Generate SQL for inserting one validated vector feature.
@@ -58,12 +60,17 @@ def create_feature_sql(
         else str(float(confidence))
     )
 
+    qc_status_clean = qc_status.replace("'", "''")
+    source_model_sql = "NULL" if source_model is None else f"'{source_model.replace('\'', '\'\'')}'"
+
     return f"""
 INSERT INTO vector_features (
     layer_version_id,
     feature_type,
     confidence,
-    geometry
+    geometry,
+    qc_status,
+    source_model
 )
 VALUES (
     {layer_version_id},
@@ -72,7 +79,9 @@ VALUES (
     ST_GeomFromText(
         '{wkt}',
         4326
-    )
+    ),
+    '{qc_status_clean}',
+    {source_model_sql}
 );
 """.strip()
 

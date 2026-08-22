@@ -47,27 +47,36 @@ FORMAT_CONFIG = {
 def fetch_layer_geojson(
     conn: psycopg.Connection,
     layer_name: str,
+    qc_only: bool = False,
 ) -> dict:
     """
     Read a PostGIS layer and convert it to GeoJSON.
+    When qc_only is True, export only accepted or edited features.
     """
+
+    where_clause = "WHERE lv.layer_name = %s"
+    params = [layer_name]
+
+    if qc_only:
+        where_clause += " AND (vf.qc_status IN ('accepted', 'edited'))"
 
     with conn.cursor() as cur:
 
         cur.execute(
-            """
+            f"""
             SELECT
                 vf.id,
                 vf.feature_type,
                 vf.confidence,
-                ST_AsGeoJSON(vf.geometry)
+                ST_AsGeoJSON(vf.geometry),
+                vf.qc_status
             FROM vector_features vf
             JOIN layer_versions lv
                 ON lv.id = vf.layer_version_id
-            WHERE lv.layer_name = %s
+            {where_clause}
             ORDER BY vf.id;
             """,
-            (layer_name,),
+            params,
         )
 
         rows = cur.fetchall()
@@ -84,6 +93,7 @@ def fetch_layer_geojson(
                 "properties": {
                     "feature_type": row[1],
                     "confidence": row[2],
+                    "qc_status": row[4] if len(row) > 4 else "pending",
                 },
             }
         )
@@ -181,6 +191,7 @@ def export_layer(
     layer_name: str,
     export_format: str,
     output_dir: Path,
+    qc_only: bool = False,
 ) -> tuple[Path, str]:
     """
     Export a PostGIS layer.
@@ -207,6 +218,7 @@ def export_layer(
     geojson = fetch_layer_geojson(
         conn,
         layer_name,
+        qc_only=qc_only,
     )
 
     if not geojson.get("features"):

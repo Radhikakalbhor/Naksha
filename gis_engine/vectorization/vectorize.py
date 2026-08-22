@@ -176,6 +176,25 @@ def feature_confidence(
         np.mean(values)
     )
 
+    # --------------------------------------------------
+    # Geometric Signals (Area Plausibility & Edge Smoothness)
+    # --------------------------------------------------
+    geom_type = getattr(geometry, "geom_type", "")
+    if geom_type in ("Polygon", "MultiPolygon"):
+        area = float(geometry.area)
+        perimeter = float(geometry.length)
+
+        # 1. Area Plausibility
+        area_factor = 1.0 if area > 0 else 0.5
+
+        # 2. Edge Smoothness (Isoperimetric Quotient / Compactness)
+        smoothness_factor = 1.0
+        if perimeter > 0 and area > 0:
+            compactness = (4.0 * np.pi * area) / (perimeter ** 2)
+            smoothness_factor = max(0.5, min(1.0, float(compactness * 2.0)))
+
+        confidence = confidence * area_factor * smoothness_factor
+
     return max(
         0.0,
         min(

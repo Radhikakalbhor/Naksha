@@ -3,7 +3,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import onnxruntime as ort
+try:
+    import onnxruntime as ort
+except ImportError:
+    ort = None
 import rasterio
 
 

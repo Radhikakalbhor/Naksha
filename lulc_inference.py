@@ -4,8 +4,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rasterio
-import torch
-from transformers import SegformerForSemanticSegmentation
+try:
+    import torch
+    from transformers import SegformerForSemanticSegmentation
+except ImportError:
+    torch = None
+    SegformerForSemanticSegmentation = None
 
 
 MODEL = "florian-morel22/segformer-b0-deepglobe-land-cover"

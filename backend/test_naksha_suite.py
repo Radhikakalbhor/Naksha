@@ -2,7 +2,15 @@ import os
 import json
 import zipfile
 import tempfile
+import sys
 from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import numpy as np
 import shapely.geometry
@@ -30,7 +38,7 @@ def run_tests():
     from gis_engine.topology.geometry import validate_geometry, simplify_geometry
     from gis_engine.postgis.export import create_layer_version_sql, create_feature_sql
 
-    print("✅ All backend modules imported cleanly without errors.")
+    print("[PASS] All backend modules imported cleanly without errors.")
 
     # 2. Polygonization & Confidence Test
     print("\n--- 2. Testing Vectorization & Confidence Utilities ---")
@@ -45,7 +53,7 @@ def run_tests():
     assert len(geoms) == 1, f"Expected 1 polygon, got {len(geoms)}"
     conf = feature_confidence(prob, geoms[0], transform)
     assert conf is not None and abs(conf - 0.85) < 1e-4, f"Expected confidence ~0.85, got {conf}"
-    print(f"✅ polygonize_mask produced {len(geoms)} geometry, confidence = {conf:.4f}")
+    print(f"[PASS] polygonize_mask produced {len(geoms)} geometry, confidence = {conf:.4f}")
 
     # 3. Geometry Validation Test
     print("\n--- 3. Testing Geometry Validation ---")
@@ -53,7 +61,7 @@ def run_tests():
     invalid_poly = Polygon([(0, 0), (0, 2), (2, 0), (2, 2), (0, 0)])
     valid_poly = validate_geometry(invalid_poly)
     assert valid_poly is not None and valid_poly.is_valid, "Failed to repair invalid polygon"
-    print("✅ validate_geometry repaired self-intersecting polygon successfully.")
+    print("[PASS] validate_geometry repaired self-intersecting polygon successfully.")
 
     # 4. SQL Generator Test
     print("\n--- 4. Testing PostGIS SQL Generators ---")
@@ -62,7 +70,7 @@ def run_tests():
 
     sql_feature = create_feature_sql(1, "buildings", Point(10, 20), 0.92)
     assert "INSERT INTO vector_features" in sql_feature and "0.92" in sql_feature
-    print("✅ PostGIS SQL generation validated.")
+    print("[PASS] PostGIS SQL generation validated.")
 
     # 5. Road Skeletonization Test
     print("\n--- 5. Testing Road Skeletonization & Centerline Extraction ---")
@@ -71,10 +79,10 @@ def run_tests():
     skel = skeletonize_road_mask(road_mask)
     lines = skeleton_to_lines(skel, transform)
     assert len(lines) > 0, "Failed to extract road centerlines"
-    print(f"✅ Road skeletonization extracted {len(lines)} centerline segment(s).")
+    print(f"[PASS] Road skeletonization extracted {len(lines)} centerline segment(s).")
 
     # 6. Export Engine Empty Feature Test
-    print("\n--- 6. Testing Export Engine Guard Rails ---")
+    print("\n--- 6. Testing Export Engine Guard Rails & QC Filtering ---")
     class MockConn:
         def cursor(self):
             class MockCursor:
@@ -88,7 +96,21 @@ def run_tests():
         export_engine.export_layer(MockConn(), "demo_buildings", "geojson", Path(tempfile.gettempdir()))
         assert False, "Should have raised ValueError on empty layer"
     except ValueError as e:
-        print(f"✅ Cleanly caught empty layer export error: {e}")
+        print(f"[PASS] Cleanly caught empty layer export error: {e}")
+
+    # 7. Celery Tasks & Async Jobs Import Test
+    print("\n--- 7. Testing Celery Tasks & Preprocessing Utilities ---")
+    import tasks
+    assert hasattr(tasks, "process_building_inference_task"), "Missing process_building_inference_task"
+    from preprocessing.crs_utils import normalize_crs
+    from preprocessing.tiler import tile_raster
+    print("[PASS] Celery tasks, crs_utils, and tiler imported cleanly.")
+
+    # 8. QC & Feature SQL Generator Test
+    print("\n--- 8. Testing Feature SQL with QC Status ---")
+    sql_feature_qc = create_feature_sql(1, "buildings", Point(10, 20), 0.95, qc_status="accepted")
+    assert "'accepted'" in sql_feature_qc and "qc_status" in sql_feature_qc
+    print("[PASS] Feature SQL with qc_status validated.")
 
     print("\n============================================================")
     print("ALL VERIFICATION CHECKS PASSED SUCCESSFULLY!")
