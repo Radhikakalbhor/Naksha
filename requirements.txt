@@ -22,3 +22,4 @@ transformers
 geopandas
 celery
 redis
+minio

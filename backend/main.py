@@ -3533,13 +3533,38 @@ async def create_job(
     with temp_path.open("wb") as buf:
         shutil.copyfileobj(file.file, buf)
 
-    job_info = {"job_id": job_id, "feature_type": feature_type, "status": "pending", "input_file": file.filename}
+    # COG conversion
+    cog_path = DATA_DIR / "temp" / f"job_cog_{job_id}{ext}"
+    try:
+        from preprocessing.cog import convert_to_cog
+        convert_to_cog(temp_path, cog_path)
+    except Exception as exc:
+        logger.warning(f"COG conversion warning ({exc}), using raw input.")
+        cog_path = temp_path
+
+    # MinIO storage upload
+    minio_status = "local_fallback"
+    try:
+        from gis_engine.storage import upload_raster_to_minio
+        upload_raster_to_minio(temp_path, job_id, category="raw")
+        _, minio_status = upload_raster_to_minio(cog_path, job_id, category="cogs")
+    except Exception as exc:
+        logger.warning(f"MinIO storage warning ({exc}), retaining local path.")
+
+    job_info = {
+        "job_id": job_id,
+        "feature_type": feature_type,
+        "status": "pending",
+        "input_file": file.filename,
+        "cog_path": str(cog_path),
+        "minio_storage": minio_status,
+    }
     IN_MEMORY_JOBS[job_id] = job_info
 
     celery_dispatched = False
     try:
         from tasks import process_building_inference_task
-        result = process_building_inference_task.delay(job_id, str(temp_path))
+        result = process_building_inference_task.delay(job_id, str(cog_path))
         job_info["celery_task_id"] = result.id
         job_info["status"] = "queued"
         celery_dispatched = True
@@ -3553,11 +3578,11 @@ async def create_job(
                 model = get_building_model()
                 image, mask, prediction = building_sliding_window_inference(
                     model=model,
-                    image_path=temp_path,
+                    image_path=cog_path,
                     patch_size=BUILDING_PATCH_SIZE,
                     stride=BUILDING_STRIDE
                 )
-                with rasterio.open(str(temp_path)) as src:
+                with rasterio.open(str(cog_path)) as src:
                     transform = src.transform
                 geoms = polygonize_mask(mask, transform, min_area=0.0)
                 stored = 0

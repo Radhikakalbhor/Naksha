@@ -112,6 +112,12 @@ def run_tests():
     assert "'accepted'" in sql_feature_qc and "qc_status" in sql_feature_qc
     print("[PASS] Feature SQL with qc_status validated.")
 
+    # 9. COG & MinIO Storage Utility Test
+    print("\n--- 9. Testing COG & MinIO Storage Utilities ---")
+    from preprocessing.cog import is_cog, convert_to_cog
+    from gis_engine.storage import get_minio_client, upload_raster_to_minio
+    print("[PASS] COG conversion and MinIO storage utilities imported successfully.")
+
     print("\n============================================================")
     print("ALL VERIFICATION CHECKS PASSED SUCCESSFULLY!")
     print("============================================================")
