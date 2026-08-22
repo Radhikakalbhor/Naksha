@@ -2077,6 +2077,7 @@ async def water_inference(
                                     feature_type="water",
                                     geometry=geometry,
                                     confidence=confidence,
+                                    source_model="skywater_segmentation",
                                 )
                             )
                             features_stored += 1

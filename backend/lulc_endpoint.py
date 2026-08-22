@@ -313,6 +313,7 @@ async def lulc_inference(
                                     confidence=(
                                         confidence
                                     ),
+                                    source_model="lulc_multiclass_unet",
                                 )
                             )
 
