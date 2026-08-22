@@ -3695,47 +3695,43 @@ async def ingest_imagery(
     with raw_path.open("wb") as buf:
         shutil.copyfileobj(file.file, buf)
 
-    # 1. CRS Normalization
+    # 1. CRS Inspection & Normalization
     normalized_path = processed_dir / f"normalized_{file.filename}"
+    detected_crs = "EPSG:4326"
     try:
-        from preprocessing.crs_utils import normalize_crs
-        normalize_crs(raw_path, normalized_path, target_crs=target_crs)
+        from gis_engine.crs.crs_utils import get_raster_crs, normalize_raster_crs
+        detected_crs = get_raster_crs(raw_path) or "EPSG:4326"
+        normalize_raster_crs(raw_path, normalized_path, target_crs=target_crs)
     except Exception as e:
-        logger.warning(f"CRS normalization failed ({e}), using source file.")
+        logger.warning(f"CRS normalization failed ({e}), using raw source file.")
         shutil.copy(raw_path, normalized_path)
 
     # 2. COG Conversion
     cog_path = processed_dir / f"cog_{file.filename}"
     try:
-        with rasterio.open(str(normalized_path)) as src:
-            profile = src.profile.copy()
-            profile.update(driver="GTiff", createoptions=["TILED=YES", "COMPRESS=DEFLATE"])
-            with rasterio.open(str(cog_path), "w", **profile) as dst:
-                for b in range(1, src.count + 1):
-                    dst.write(src.read(b), b)
+        from preprocessing.cog import convert_to_cog
+        convert_to_cog(normalized_path, cog_path)
     except Exception as e:
-        logger.warning(f"COG conversion warning: {e}")
+        logger.warning(f"COG conversion warning ({e}), using normalized file.")
         shutil.copy(normalized_path, cog_path)
 
     # 3. Tiling
     tiles_dir = processed_dir / "tiles"
+    tile_files = []
     try:
         from preprocessing.tiler import tile_raster
-        tile_raster(cog_path, tiles_dir, tile_size=tile_size, overlap=overlap)
+        tile_files = [str(p) for p in tile_raster(cog_path, tiles_dir, tile_size=tile_size, overlap=overlap)]
     except Exception as e:
-        logger.warning(f"Tiling warning: {e}")
+        logger.warning(f"Tiling warning ({e}).")
 
-    # 4. MinIO Storage Check
-    minio_status = "skipped"
-    minio_url = os.getenv("MINIO_ENDPOINT", "http://naksha-minio:9000")
+    # 4. MinIO Storage Upload
+    minio_status = "local_fallback"
     try:
-        import urllib.request
-        req = urllib.request.Request(f"{minio_url}/minio/health/live")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            if resp.status == 200:
-                minio_status = "connected"
-    except Exception:
-        minio_status = "minio_offline_local_storage_used"
+        from gis_engine.storage import upload_raster_to_minio
+        upload_raster_to_minio(raw_path, job_id, category="raw")
+        _, minio_status = upload_raster_to_minio(cog_path, job_id, category="cogs")
+    except Exception as e:
+        logger.warning(f"MinIO storage warning ({e}).")
 
     return {
         "status": "success",

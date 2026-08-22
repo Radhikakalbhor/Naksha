@@ -102,7 +102,7 @@ def run_tests():
     print("\n--- 7. Testing Celery Tasks & Preprocessing Utilities ---")
     import tasks
     assert hasattr(tasks, "process_building_inference_task"), "Missing process_building_inference_task"
-    from preprocessing.crs_utils import normalize_crs
+    from gis_engine.crs.crs_utils import get_raster_crs, normalize_raster_crs
     from preprocessing.tiler import tile_raster
     print("[PASS] Celery tasks, crs_utils, and tiler imported cleanly.")
 
