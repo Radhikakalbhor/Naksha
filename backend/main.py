@@ -9,7 +9,7 @@ import uuid
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any, List
 
 import cv2
 import numpy as np
@@ -81,7 +81,7 @@ app.include_router(lulc_router)
 # ============================================================
 
 POSTGIS_CONFIG = {
-    "host": os.getenv("POSTGRES_HOST", "naksha-postgres"),
+    "host": os.getenv("POSTGRES_HOST", "postgres"),
     "dbname": os.getenv("POSTGRES_DB", "naksha"),
     "user": os.getenv("POSTGRES_USER", "naksha"),
     "password": os.getenv("POSTGRES_PASSWORD", "naksha_dev"),
@@ -1043,6 +1043,26 @@ def get_layer(layer_name: str):
 # ============================================================
 # DAY 6 - VECTOR LAYER EXPORT
 # ============================================================
+
+@app.get("/layers/{layer_name}/export")
+def export_vector_layer_query(
+    layer_name: str,
+    format: Optional[str] = Query(None, alias="format"),
+    export_format: Optional[str] = Query(None),
+    qc_only: bool = Query(False),
+):
+    fmt = format or export_format
+    if not fmt:
+        raise HTTPException(
+            status_code=400,
+            detail="Export format required. Provide path parameter '/export/{format}' or query parameter '?format={format}'."
+        )
+    return export_vector_layer(
+        layer_name=layer_name,
+        export_format=fmt,
+        qc_only=qc_only,
+    )
+
 
 @app.get("/layers/{layer_name}/export/{export_format}")
 def export_vector_layer(
@@ -3311,9 +3331,17 @@ def road_mask(
 # ============================================================
 
 @app.get("/qc/queue")
-def get_qc_queue(layer_name: Optional[str] = Query(None), status: Optional[str] = Query("pending")):
+def get_qc_queue(
+    layer_name: Optional[str] = Query(None),
+    status: Optional[str] = Query("pending"),
+    limit: int = Query(100, ge=1),
+    offset: int = Query(0, ge=0),
+):
     if layer_name and layer_name not in ALLOWED_LAYERS:
         raise HTTPException(status_code=404, detail="Layer not found.")
+
+    effective_limit = min(limit, 1000)
+
     try:
         query_parts = [
             """
@@ -3347,7 +3375,10 @@ def get_qc_queue(layer_name: Optional[str] = Query(None), status: Optional[str] 
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
 
-        query_parts.append("ORDER BY vf.confidence ASC NULLS FIRST, vf.id ASC;")
+        query_parts.append("ORDER BY vf.confidence ASC NULLS FIRST, vf.id ASC")
+        query_parts.append("LIMIT %s OFFSET %s;")
+        params.extend([effective_limit, offset])
+
         sql = " ".join(query_parts)
 
         with get_postgis_connection() as conn:
@@ -3359,6 +3390,8 @@ def get_qc_queue(layer_name: Optional[str] = Query(None), status: Optional[str] 
             "type": "FeatureCollection",
             "layer_name": layer_name,
             "status": status,
+            "limit": effective_limit,
+            "offset": offset,
             "features": [
                 {
                     "type": "Feature",
@@ -3520,6 +3553,27 @@ def update_qc_feature(feature_id: int, payload: dict = Body(...)):
 
 IN_MEMORY_JOBS = {}
 
+
+def save_job_to_db(job_id: str, feature_type: str, status: str, input_file: str, celery_task_id: str = None, result: dict = None):
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO jobs (job_id, celery_task_id, feature_type, status, input_file, result, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        celery_task_id = COALESCE(EXCLUDED.celery_task_id, jobs.celery_task_id),
+                        feature_type = EXCLUDED.feature_type,
+                        status = EXCLUDED.status,
+                        input_file = EXCLUDED.input_file,
+                        result = EXCLUDED.result,
+                        updated_at = CURRENT_TIMESTAMP;
+                """, (job_id, celery_task_id, feature_type, status, input_file, json.dumps(result or {})))
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Failed to persist job {job_id} to DB: {e}")
+
+
 @app.post("/jobs")
 async def create_job(
     background_tasks: BackgroundTasks,
@@ -3560,54 +3614,34 @@ async def create_job(
         "minio_storage": minio_status,
     }
     IN_MEMORY_JOBS[job_id] = job_info
+    save_job_to_db(job_id, feature_type, "pending", file.filename, result=job_info)
 
     celery_dispatched = False
     try:
-        from tasks import process_building_inference_task
-        result = process_building_inference_task.delay(job_id, str(cog_path))
-        job_info["celery_task_id"] = result.id
-        job_info["status"] = "queued"
-        celery_dispatched = True
+        from tasks import dispatch_task
+        result = dispatch_task(job_id, feature_type, str(cog_path))
+        if result and hasattr(result, "id"):
+            job_info["celery_task_id"] = result.id
+            job_info["status"] = "queued"
+            save_job_to_db(job_id, feature_type, "queued", file.filename, celery_task_id=result.id, result=job_info)
+            celery_dispatched = True
     except Exception as exc:
         logger.warning(f"Celery dispatch unavailable ({exc}), using background task fallback.")
 
     if not celery_dispatched:
         async def run_fallback():
             job_info["status"] = "processing"
+            save_job_to_db(job_id, feature_type, "processing", file.filename, result=job_info)
             try:
-                model = get_building_model()
-                image, mask, prediction = building_sliding_window_inference(
-                    model=model,
-                    image_path=cog_path,
-                    patch_size=BUILDING_PATCH_SIZE,
-                    stride=BUILDING_STRIDE
-                )
-                with rasterio.open(str(cog_path)) as src:
-                    transform = src.transform
-                geoms = polygonize_mask(mask, transform, min_area=0.0)
-                stored = 0
-                if geoms:
-                    with get_postgis_connection() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM layer_versions WHERE layer_name = 'uploaded_buildings'")
-                            ver = cur.fetchone()[0]
-                            cur.execute(create_layer_version_sql("uploaded_buildings", "buildings", ver))
-                            lvid = cur.fetchone()[0]
-                            for g in geoms:
-                                vg = validate_geometry(g)
-                                if not vg:
-                                    continue
-                                c = feature_confidence(prediction, vg, transform)
-                                if c is None:
-                                    continue
-                                cur.execute(create_feature_sql(lvid, "buildings", vg, c))
-                                stored += 1
-                        conn.commit()
+                from tasks import run_inference_job
+                res = run_inference_job(job_id, feature_type, str(cog_path))
                 job_info["status"] = "completed"
-                job_info["features_stored"] = stored
+                job_info["result"] = res
+                save_job_to_db(job_id, feature_type, "completed", file.filename, result=job_info)
             except Exception as e:
                 job_info["status"] = "failed"
                 job_info["error"] = str(e)
+                save_job_to_db(job_id, feature_type, "failed", file.filename, result=job_info)
 
         background_tasks.add_task(run_fallback)
 
@@ -3615,61 +3649,119 @@ async def create_job(
 
 
 @app.get("/jobs")
-def list_jobs():
+def list_jobs(task_type: Optional[str] = Query(None), limit: Optional[int] = Query(None)):
     jobs_list = []
-    for jid, info in IN_MEMORY_JOBS.items():
-        status_info = dict(info)
-        celery_task_id = info.get("celery_task_id")
-        if celery_task_id:
-            try:
-                from tasks import celery_app
-                if celery_app is not None:
-                    res = celery_app.AsyncResult(celery_task_id)
-                    state = res.state
-                    if state in ("PENDING", "RECEIVED"):
-                        status_info["status"] = "queued"
-                    elif state == "STARTED":
-                        status_info["status"] = "processing"
-                    elif state == "SUCCESS":
-                        status_info["status"] = "completed"
-                    elif state == "FAILURE":
-                        status_info["status"] = "failed"
-            except Exception:
-                pass
-        jobs_list.append(status_info)
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                where_clause = "WHERE feature_type = %s" if task_type else ""
+                params = (task_type,) if task_type else ()
+                limit_clause = f"LIMIT {limit}" if limit and limit > 0 else ""
+
+                cur.execute(f"""
+                    SELECT job_id, celery_task_id, feature_type, status, input_file, result, created_at, updated_at
+                    FROM jobs
+                    {where_clause}
+                    ORDER BY created_at DESC
+                    {limit_clause};
+                """, params)
+                rows = cur.fetchall()
+                for row in rows:
+                    jid, c_tid, ftype, status, inp, res, cat, uat = row
+                    res_dict = res if isinstance(res, dict) else (json.loads(res) if res else {})
+                    info = {
+                        "job_id": jid,
+                        "celery_task_id": c_tid,
+                        "feature_type": ftype,
+                        "status": status,
+                        "input_file": inp,
+                        "created_at": cat.isoformat() if cat else None,
+                        "updated_at": uat.isoformat() if uat else None,
+                    }
+                    if isinstance(res_dict, dict):
+                        info.update(res_dict)
+
+                    if c_tid:
+                        try:
+                            from tasks import celery_app
+                            if celery_app is not None:
+                                res_celery = celery_app.AsyncResult(c_tid)
+                                state = res_celery.state
+                                if state in ("PENDING", "RECEIVED"):
+                                    info["status"] = "queued"
+                                elif state == "STARTED":
+                                    info["status"] = "processing"
+                                elif state == "SUCCESS":
+                                    info["status"] = "completed"
+                                elif state == "FAILURE":
+                                    info["status"] = "failed"
+                        except Exception:
+                            pass
+                    jobs_list.append(info)
+    except Exception as e:
+        logger.warning(f"Error querying jobs from DB ({e}), fallback to memory.")
+        for jid, info in IN_MEMORY_JOBS.items():
+            if task_type and info.get("feature_type") != task_type:
+                continue
+            jobs_list.append(dict(info))
+
     return {"jobs": jobs_list, "total": len(jobs_list)}
 
 
 @app.get("/jobs/{job_id}")
 def get_job_status(job_id: str):
-    if job_id not in IN_MEMORY_JOBS:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    
-    job_info = IN_MEMORY_JOBS[job_id]
-    celery_task_id = job_info.get("celery_task_id")
-    
-    if celery_task_id:
-        try:
-            from tasks import celery_app
-            if celery_app is not None:
-                res = celery_app.AsyncResult(celery_task_id)
-                state = res.state
-                
-                if state in ("PENDING", "RECEIVED"):
-                    job_info["status"] = "queued"
-                elif state == "STARTED":
-                    job_info["status"] = "processing"
-                elif state == "SUCCESS":
-                    job_info["status"] = "completed"
-                    return res.result
-                elif state == "FAILURE":
-                    job_info["status"] = "failed"
-                    if res.result:
-                        job_info["error"] = str(res.result)
-        except Exception:
-            pass
-            
-    return job_info
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT job_id, celery_task_id, feature_type, status, input_file, result, created_at, updated_at
+                    FROM jobs
+                    WHERE job_id = %s;
+                """, (job_id,))
+                row = cur.fetchone()
+                if row:
+                    jid, c_tid, ftype, status, inp, res, cat, uat = row
+                    res_dict = res if isinstance(res, dict) else (json.loads(res) if res else {})
+                    job_info = {
+                        "job_id": jid,
+                        "celery_task_id": c_tid,
+                        "feature_type": ftype,
+                        "status": status,
+                        "input_file": inp,
+                        "created_at": cat.isoformat() if cat else None,
+                        "updated_at": uat.isoformat() if uat else None,
+                    }
+                    if isinstance(res_dict, dict):
+                        job_info.update(res_dict)
+
+                    if c_tid:
+                        try:
+                            from tasks import celery_app
+                            if celery_app is not None:
+                                res_celery = celery_app.AsyncResult(c_tid)
+                                state = res_celery.state
+                                if state in ("PENDING", "RECEIVED"):
+                                    job_info["status"] = "queued"
+                                elif state == "STARTED":
+                                    job_info["status"] = "processing"
+                                elif state == "SUCCESS":
+                                    job_info["status"] = "completed"
+                                    if res_celery.result:
+                                        job_info["result"] = res_celery.result
+                                elif state == "FAILURE":
+                                    job_info["status"] = "failed"
+                                    if res_celery.result:
+                                        job_info["error"] = str(res_celery.result)
+                        except Exception:
+                            pass
+                    return job_info
+    except Exception as e:
+        logger.warning(f"Error fetching job {job_id} from DB: {e}")
+
+    if job_id in IN_MEMORY_JOBS:
+        return IN_MEMORY_JOBS[job_id]
+
+    raise HTTPException(status_code=404, detail="Job not found.")
 
 
 # ============================================================
@@ -3748,47 +3840,274 @@ async def ingest_imagery(
     }
 
 
-@app.get("/accuracy/report")
-def get_accuracy_report(layer_name: str):
-    if layer_name not in ALLOWED_LAYERS:
-        raise HTTPException(status_code=404, detail="Layer not found.")
+FEATURE_TYPE_REFERENCE_MAP = {
+    "trees": [
+        BASE_DIR / "gis_engine" / "postgis" / "trees_v1.geojson",
+    ],
+    "farms": [
+        BASE_DIR / "gis_engine" / "postgis" / "farms_v1.geojson",
+    ],
+    "fields": [
+        BASE_DIR / "gis_engine" / "postgis" / "farms_v1.geojson",
+    ],
+    "buildings": [
+        BASE_DIR / "gis_engine" / "postgis" / "buildings_v1.geojson",
+        DATA_DIR / "raw" / "spacenet" / "SN2_buildings_train_AOI_3_Paris_geojson_buildings_img10.geojson",
+    ],
+    "roads": [
+        BASE_DIR / "gis_engine" / "postgis" / "roads_v1.geojson",
+    ],
+    "water": [
+        BASE_DIR / "gis_engine" / "postgis" / "water_v1.geojson",
+    ],
+    "lulc": [
+        BASE_DIR / "gis_engine" / "postgis" / "lulc_v1.geojson",
+    ],
+}
+
+
+def get_ground_truth_reference_and_metrics(
+    feature_type: str,
+    pred_geoms: list,
+    user_ref_path: Optional[str] = None
+) -> Tuple[bool, Optional[str], Optional[dict]]:
+    """
+    Find matching reference dataset strictly matching feature_type, validate it,
+    and calculate ground-truth accuracy metrics if available.
+
+    Returns:
+        (ground_truth_accuracy_available: bool, reference_source_path: str|None, metrics_dict: dict|None)
+    """
+    ftype_norm = (feature_type or "").lower().strip()
+
+    candidates = []
+    if user_ref_path:
+        p = Path(user_ref_path)
+        if p.exists():
+            candidates.append(p)
+
+    matching_map_paths = FEATURE_TYPE_REFERENCE_MAP.get(ftype_norm, [])
+    candidates.extend(matching_map_paths)
+
+    valid_ref_path = None
+    gt_geoms = []
+
+    for cand in candidates:
+        if cand.exists():
+            try:
+                with open(cand, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                features = data.get("features", [])
+                parsed_geoms = []
+                for feat in features:
+                    if feat and feat.get("geometry"):
+                        try:
+                            g = shape(feat["geometry"])
+                            if g and not g.is_empty:
+                                parsed_geoms.append(g)
+                        except Exception:
+                            continue
+                if parsed_geoms:
+                    valid_ref_path = cand
+                    gt_geoms = parsed_geoms
+                    break
+            except Exception as exc:
+                logger.warning(f"Error reading reference dataset candidate {cand}: {exc}")
+                continue
+
+    if not valid_ref_path or not gt_geoms:
+        return False, None, None
+
+    try:
+        from gis_engine.validation import compute_vector_metrics
+        metrics = compute_vector_metrics(pred_geoms, gt_geoms, iou_threshold=0.5)
+        metrics["predicted_feature_count"] = len(pred_geoms)
+        metrics["reference_feature_count"] = len(gt_geoms)
+        return True, str(valid_ref_path), metrics
+    except Exception as e:
+        logger.warning(f"Failed computing vector metrics with reference {valid_ref_path}: {e}")
+        return False, str(valid_ref_path), None
+
+
+def fetch_layer_quality_report(identifier: str | int):
     try:
         with get_postgis_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT
-                        COUNT(vf.id) AS total_features,
-                        COALESCE(AVG(vf.confidence), 0.0) AS mean_confidence,
-                        COUNT(CASE WHEN vf.qc_status = 'accepted' THEN 1 END) AS accepted_count,
-                        COUNT(CASE WHEN vf.qc_status = 'edited' THEN 1 END) AS edited_count,
-                        COUNT(CASE WHEN vf.qc_status = 'rejected' THEN 1 END) AS rejected_count,
-                        COUNT(CASE WHEN vf.qc_status = 'pending' OR vf.qc_status IS NULL THEN 1 END) AS pending_count,
-                        COALESCE(SUM(ST_Area(vf.geometry)), 0.0) AS total_surface_area
-                    FROM vector_features vf
-                    JOIN layer_versions lv ON lv.id = vf.layer_version_id
-                    WHERE lv.layer_name = %s;
-                    """,
-                    (layer_name,),
-                )
-                row = cur.fetchone()
-                total, mean_conf, acc, ed, rej, pend, area = row
-        return {
-            "status": "success",
-            "layer_name": layer_name,
-            "metrics": {
-                "total_features": total,
-                "mean_confidence": round(float(mean_conf), 4),
-                "total_surface_area": round(float(area), 6),
-                "qc_breakdown": {
-                    "accepted": acc,
-                    "edited": ed,
-                    "rejected": rej,
-                    "pending": pend,
-                },
-                "acceptance_rate": round(float((acc + ed) / total * 100), 2) if total > 0 else 0.0,
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"message": "Failed to generate accuracy report.", "error": str(e)})
+                is_numeric = isinstance(identifier, int) or (isinstance(identifier, str) and identifier.isdigit())
+                if is_numeric:
+                    layer_id_param = int(identifier)
+                    layer_name_param = None
+                else:
+                    layer_id_param = None
+                    layer_name_param = str(identifier)
 
+                sql = """
+                SELECT
+                    lv.id AS layer_id,
+                    lv.layer_name,
+                    lv.version,
+                    lv.feature_type,
+                    COUNT(vf.id) AS total_features,
+                    COUNT(CASE WHEN vf.qc_status = 'pending' OR vf.qc_status IS NULL THEN 1 END) AS pending_count,
+                    COUNT(CASE WHEN vf.qc_status = 'accepted' THEN 1 END) AS accepted_count,
+                    COUNT(CASE WHEN vf.qc_status = 'edited' THEN 1 END) AS edited_count,
+                    COUNT(CASE WHEN vf.qc_status = 'rejected' THEN 1 END) AS rejected_count,
+                    COALESCE(MIN(vf.confidence), 0.0) AS min_confidence,
+                    COALESCE(MAX(vf.confidence), 0.0) AS max_confidence,
+                    COALESCE(AVG(vf.confidence), 0.0) AS mean_confidence,
+                    COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY vf.confidence), 0.0) AS median_confidence,
+                    COUNT(CASE WHEN vf.confidence >= 0.90 THEN 1 END) AS high_confidence_count,
+                    COUNT(CASE WHEN vf.confidence >= 0.75 AND vf.confidence < 0.90 THEN 1 END) AS medium_confidence_count,
+                    COUNT(CASE WHEN vf.confidence < 0.50 THEN 1 END) AS low_confidence_count,
+                    COUNT(CASE WHEN ST_IsValid(vf.geometry) THEN 1 END) AS valid_geometry_count,
+                    COUNT(CASE WHEN NOT ST_IsValid(vf.geometry) THEN 1 END) AS invalid_geometry_count
+                FROM layer_versions lv
+                LEFT JOIN vector_features vf ON vf.layer_version_id = lv.id
+                WHERE (%s::TEXT IS NOT NULL AND lv.layer_name = %s)
+                   OR (%s::INT IS NOT NULL AND lv.id = %s)
+                GROUP BY lv.id, lv.layer_name, lv.version, lv.feature_type
+                ORDER BY lv.version DESC
+                LIMIT 1;
+                """
+                cur.execute(sql, (layer_name_param, layer_name_param, layer_id_param, layer_id_param))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Layer not found.")
+
+                (
+                    lid, lname, ver, ftype, total,
+                    pend, acc, ed, rej,
+                    c_min, c_max, c_mean, c_med,
+                    c_high, c_med_thresh, c_low,
+                    g_valid, g_invalid
+                ) = row
+
+                total_int = int(total or 0)
+                pend_pct = round((pend / total_int * 100), 2) if total_int > 0 else 0.0
+                acc_pct = round((acc / total_int * 100), 2) if total_int > 0 else 0.0
+                ed_pct = round((ed / total_int * 100), 2) if total_int > 0 else 0.0
+                rej_pct = round((rej / total_int * 100), 2) if total_int > 0 else 0.0
+
+                cur.execute("""
+                    SELECT ST_AsGeoJSON(vf.geometry)
+                    FROM vector_features vf
+                    WHERE vf.layer_version_id = %s;
+                """, (lid,))
+                pred_rows = cur.fetchall()
+                pred_geoms = [shape(json.loads(r[0])) for r in pred_rows if r[0]]
+
+                gt_avail, gt_ref_src, gt_metrics = get_ground_truth_reference_and_metrics(ftype, pred_geoms)
+
+                res_dict = {
+                    "status": "success",
+                    "layer_id": lid,
+                    "layer_name": lname,
+                    "version": ver,
+                    "feature_type": ftype,
+                    "total_features": total_int,
+                    "qc": {
+                        "pending": int(pend or 0),
+                        "accepted": int(acc or 0),
+                        "edited": int(ed or 0),
+                        "rejected": int(rej or 0),
+                        "pending_pct": pend_pct,
+                        "accepted_pct": acc_pct,
+                        "edited_pct": ed_pct,
+                        "rejected_pct": rej_pct,
+                    },
+                    "confidence": {
+                        "min": round(float(c_min or 0.0), 4),
+                        "max": round(float(c_max or 0.0), 4),
+                        "mean": round(float(c_mean or 0.0), 4),
+                        "median": round(float(c_med or 0.0), 4),
+                        "high_confidence": int(c_high or 0),
+                        "medium_confidence": int(c_med_thresh or 0),
+                        "low_confidence": int(c_low or 0),
+                    },
+                    "geometry": {
+                        "valid": int(g_valid or 0),
+                        "invalid": int(g_invalid or 0),
+                    },
+                    "ground_truth_accuracy_available": gt_avail,
+                }
+                if gt_avail and gt_metrics:
+                    res_dict["reference_source"] = gt_ref_src
+                    res_dict["ground_truth_metrics"] = gt_metrics
+
+                return res_dict
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"message": "Failed to generate quality report.", "error": str(e)})
+
+
+@app.get("/accuracy-report/{layer_id}")
+def get_accuracy_report_by_id(layer_id: str):
+    return fetch_layer_quality_report(layer_id)
+
+
+@app.get("/accuracy/report")
+def get_accuracy_report(layer_name: Optional[str] = Query(None), layer_id: Optional[str] = Query(None)):
+    target = layer_id or layer_name or "uploaded_buildings"
+    return fetch_layer_quality_report(target)
+
+
+@app.post("/accuracy/evaluate")
+def evaluate_ground_truth_accuracy(
+    layer_name: Optional[str] = Query(None),
+    layer_id: Optional[str] = Query(None),
+    reference_file_path: Optional[str] = Query(None)
+):
+    target_layer = layer_id or layer_name or "uploaded_buildings"
+    try:
+        with get_postgis_connection() as conn:
+            with conn.cursor() as cur:
+                is_numeric = isinstance(target_layer, int) or (isinstance(target_layer, str) and target_layer.isdigit())
+                if is_numeric:
+                    where_sql = "lv.id = %s"
+                    param = int(target_layer)
+                else:
+                    where_sql = "lv.layer_name = %s"
+                    param = str(target_layer)
+
+                cur.execute(f"""
+                    SELECT lv.id, lv.layer_name, lv.feature_type
+                    FROM layer_versions lv
+                    WHERE {where_sql}
+                    ORDER BY lv.version DESC
+                    LIMIT 1;
+                """, (param,))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Layer not found.")
+
+                lid, lname, ftype = row
+
+                cur.execute("""
+                    SELECT ST_AsGeoJSON(vf.geometry)
+                    FROM vector_features vf
+                    WHERE vf.layer_version_id = %s;
+                """, (lid,))
+                pred_rows = cur.fetchall()
+                pred_geoms = [shape(json.loads(r[0])) for r in pred_rows if r[0]]
+
+                gt_avail, gt_ref_src, gt_metrics = get_ground_truth_reference_and_metrics(
+                    ftype, pred_geoms, user_ref_path=reference_file_path
+                )
+
+                res = {
+                    "status": "success",
+                    "layer_id": lid,
+                    "layer_name": lname,
+                    "feature_type": ftype,
+                    "ground_truth_accuracy_available": gt_avail,
+                    "reference_source": gt_ref_src,
+                }
+                if gt_avail and gt_metrics:
+                    res["metrics"] = gt_metrics
+
+                return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ground truth evaluation failed: {e}")

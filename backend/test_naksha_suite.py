@@ -112,11 +112,18 @@ def run_tests():
     assert "'accepted'" in sql_feature_qc and "qc_status" in sql_feature_qc
     print("[PASS] Feature SQL with qc_status validated.")
 
-    # 9. COG & MinIO Storage Utility Test
-    print("\n--- 9. Testing COG & MinIO Storage Utilities ---")
-    from preprocessing.cog import is_cog, convert_to_cog
-    from gis_engine.storage import get_minio_client, upload_raster_to_minio
-    print("[PASS] COG conversion and MinIO storage utilities imported successfully.")
+    # 10. Ground Truth Evaluation, Persistent Jobs & Export Engine Formats Test
+    print("\n--- 10. Testing Ground Truth Accuracy Metrics & Export Formats ---")
+    from gis_engine.validation import compute_vector_metrics
+    p_box = Polygon([(0, 0), (0, 10), (10, 10), (10, 0)])
+    g_box = Polygon([(0, 0), (0, 10), (10, 10), (10, 0)])
+    metrics = compute_vector_metrics([p_box], [g_box])
+    assert metrics["iou"] == 1.0 and metrics["f1_score"] == 1.0, f"Expected 1.0 metrics, got {metrics}"
+    print(f"[PASS] Vector ground truth metric computation validated (IoU={metrics['iou']}, F1={metrics['f1_score']}).")
+
+    from export_engine import SUPPORTED_FORMATS
+    assert "geojson" in SUPPORTED_FORMATS and "shapefile" in SUPPORTED_FORMATS and "geopackage" in SUPPORTED_FORMATS and "filegdb" in SUPPORTED_FORMATS
+    print(f"[PASS] Export Engine supports formats: {SUPPORTED_FORMATS}")
 
     print("\n============================================================")
     print("ALL VERIFICATION CHECKS PASSED SUCCESSFULLY!")
