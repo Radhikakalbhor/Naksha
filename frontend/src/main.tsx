@@ -1,29 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-
-import {
-  MapContainer,
-  TileLayer,
-  GeoJSON,
-} from "react-leaflet";
-
-import type { GeoJsonObject } from "geojson";
+import { MapContainer, TileLayer, GeoJSON } from "react-leaflet";
 import type { LatLngBoundsExpression } from "leaflet";
-
 import "leaflet/dist/leaflet.css";
 
-
 // ============================================================
-// API
+// API Configuration
 // ============================================================
-
 const API_URL = "http://127.0.0.1:8000";
-
 
 // ============================================================
 // Types
 // ============================================================
-
 type PostGISLayer = {
   id: number;
   layer_name: string;
@@ -32,60 +20,47 @@ type PostGISLayer = {
   feature_count: number;
 };
 
+// Feature Types Definition
+const FEATURE_TYPES = [
+  { id: "buildings", label: "Buildings" },
+  { id: "roads", label: "Roads" },
+  { id: "trees", label: "Trees" },
+  { id: "water", label: "Water" },
+  { id: "fields", label: "Farms / Fields" },
+  { id: "lulc", label: "LULC" },
+];
 
 // ============================================================
-// GeoJSON bounds helper
+// GeoJSON Bounds Helper
 // ============================================================
-
-function calculateGeoJSONBounds(
-  geojson: any
-): LatLngBoundsExpression | null {
-
+function calculateGeoJSONBounds(geojson: any): LatLngBoundsExpression | null {
   const coordinates: number[][] = [];
 
   function collectCoordinates(value: any): void {
-    if (!Array.isArray(value)) {
-      return;
-    }
-
-    if (
-      value.length >= 2 &&
-      typeof value[0] === "number" &&
-      typeof value[1] === "number"
-    ) {
+    if (!Array.isArray(value)) return;
+    if (value.length >= 2 && typeof value[0] === "number" && typeof value[1] === "number") {
       coordinates.push([value[0], value[1]]);
       return;
     }
-
     for (const item of value) {
       collectCoordinates(item);
     }
   }
 
   function collectGeometry(geometry: any): void {
-    if (!geometry) {
-      return;
-    }
-
-    if (
-      geometry.type === "GeometryCollection" &&
-      Array.isArray(geometry.geometries)
-    ) {
+    if (!geometry) return;
+    if (geometry.type === "GeometryCollection" && Array.isArray(geometry.geometries)) {
       for (const item of geometry.geometries) {
         collectGeometry(item);
       }
       return;
     }
-
     if (geometry.coordinates) {
       collectCoordinates(geometry.coordinates);
     }
   }
 
-  if (
-    geojson?.type === "FeatureCollection" &&
-    Array.isArray(geojson.features)
-  ) {
+  if (geojson?.type === "FeatureCollection" && Array.isArray(geojson.features)) {
     for (const feature of geojson.features) {
       collectGeometry(feature?.geometry);
     }
@@ -95,9 +70,7 @@ function calculateGeoJSONBounds(
     collectGeometry(geojson);
   }
 
-  if (coordinates.length === 0) {
-    return null;
-  }
+  if (coordinates.length === 0) return null;
 
   let minLon = Infinity;
   let maxLon = -Infinity;
@@ -107,7 +80,6 @@ function calculateGeoJSONBounds(
   for (const coordinate of coordinates) {
     const lon = coordinate[0];
     const lat = coordinate[1];
-
     minLon = Math.min(minLon, lon);
     maxLon = Math.max(maxLon, lon);
     minLat = Math.min(minLat, lat);
@@ -120,45 +92,35 @@ function calculateGeoJSONBounds(
   ];
 }
 
-
 // ============================================================
-// APP
+// Main Application Component
 // ============================================================
-
 function App() {
-
-  // File & Upload state
+  // State Management
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
 
-  // AI Detection state
   const [selectedFeatureType, setSelectedFeatureType] = useState<string>("buildings");
   const [loading, setLoading] = useState(false);
   const [activeOperation, setActiveOperation] = useState("");
-  const [message, setMessage] = useState("Select an orthophoto to begin.");
+  const [message, setMessage] = useState("Select an orthophoto image to begin digitization.");
 
-  // Map Bounds
   const [mapBounds, setMapBounds] = useState<LatLngBoundsExpression | null>(null);
 
-  // PostGIS layer state
   const [layers, setLayers] = useState<PostGISLayer[]>([]);
   const [selectedLayer, setSelectedLayer] = useState("");
   const [layerGeoJSON, setLayerGeoJSON] = useState<any | null>(null);
   const [layerLoading, setLayerLoading] = useState(false);
 
-  // Selected Feature for QC & Confidence
   const [selectedFeature, setSelectedFeature] = useState<any | null>(null);
   const [qcActionLoading, setQcActionLoading] = useState(false);
   const [qcFeedback, setQcFeedback] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
-  // GeoJSON Export State
   const [exporting, setExporting] = useState(false);
 
-
   // ============================================================
-  // 1. Load available PostGIS layers on startup
+  // 1. Load Available PostGIS Layers on Startup
   // ============================================================
-
   async function loadLayers() {
     try {
       const response = await fetch(`${API_URL}/layers`);
@@ -166,7 +128,14 @@ function App() {
       if (!response.ok) {
         throw new Error(data?.detail || "Could not load PostGIS layers.");
       }
-      setLayers(data.layers || []);
+      const fetchedLayers: PostGISLayer[] = data.layers || [];
+      setLayers(fetchedLayers);
+
+      const hasUploadedFarms = fetchedLayers.some((l) => l.layer_name === "uploaded_farms");
+      if (hasUploadedFarms && !selectedLayer) {
+        setSelectedLayer("uploaded_farms");
+        loadPostGISLayer("uploaded_farms");
+      }
     } catch (error) {
       console.error("Could not load layers:", error);
     }
@@ -176,11 +145,9 @@ function App() {
     loadLayers();
   }, []);
 
-
   // ============================================================
-  // 2. Load selected PostGIS layer
+  // 2. Load Selected PostGIS Layer
   // ============================================================
-
   async function loadPostGISLayer(layerName: string) {
     if (!layerName) {
       setLayerGeoJSON(null);
@@ -208,67 +175,46 @@ function App() {
         setMapBounds(bounds);
       }
 
-      setMessage(`Layer ${layerName} loaded successfully.`);
+      setMessage(`Layer "${layerName}" loaded successfully.`);
     } catch (error) {
       console.error(error);
-      setMessage(
-        error instanceof Error ? error.message : "Could not load PostGIS layer."
-      );
+      setMessage(error instanceof Error ? error.message : "Could not load PostGIS layer.");
     } finally {
       setLayerLoading(false);
     }
   }
 
-
   // ============================================================
-  // 3. File selection & backend /ingest call
+  // 3. File Selection & Ingest Call
   // ============================================================
-
-  async function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const selectedFile = event.target.files?.[0] ?? null;
     setFile(selectedFile);
     setSelectedFeature(null);
     setQcFeedback(null);
 
     if (selectedFile) {
-      setMessage(`Selected file: ${selectedFile.name}. Uploading image to backend...`);
-      setUploading(true);
+      setMessage(`File selected: ${selectedFile.name}. Select target feature type and click Run Detection.`);
 
-      try {
-        const formData = new FormData();
-        formData.append("file", selectedFile);
-
-        const response = await fetch(`${API_URL}/ingest`, {
-          method: "POST",
-          body: formData,
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-          setMessage(`File ${selectedFile.name} uploaded successfully. Select target feature type and click Run Detection.`);
-        } else {
-          setMessage(`File selected: ${selectedFile.name}. Ready for AI analysis.`);
-        }
-      } catch (error) {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      fetch(`${API_URL}/ingest`, {
+        method: "POST",
+        body: formData,
+      }).catch((error) => {
         console.warn("Ingest upload warning:", error);
-        setMessage(`File selected: ${selectedFile.name}. Ready for AI analysis.`);
-      } finally {
-        setUploading(false);
-      }
+      });
     } else {
-      setMessage("Select an orthophoto to begin.");
+      setMessage("Select an orthophoto image to begin digitization.");
     }
   }
-
 
   // ============================================================
   // 4. Run AI Detection
   // ============================================================
-
   async function handleRunDetection() {
     if (!file) {
-      setMessage("Please select an orthophoto file first.");
+      setMessage("Please select an orthophoto image file first.");
       return;
     }
 
@@ -305,12 +251,12 @@ function App() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(
-          data?.detail?.message || data?.detail || "Detection failed."
-        );
+        const detailMsg = typeof data?.detail === "string"
+          ? data.detail
+          : data?.detail?.message || data?.detail?.error || "Detection failed.";
+        throw new Error(detailMsg);
       }
 
-      // Reload PostGIS layer list
       await loadLayers();
 
       const layerTypeMap: Record<string, string> = {
@@ -320,6 +266,7 @@ function App() {
         water: "uploaded_water",
         lulc: "uploaded_lulc",
         fields: "uploaded_farms",
+        farms: "uploaded_farms",
       };
 
       const uploadedLayerName = layerTypeMap[selectedFeatureType] || `uploaded_${selectedFeatureType}`;
@@ -329,20 +276,16 @@ function App() {
       setMessage(`${selectedFeatureType} detection completed successfully.`);
     } catch (error) {
       console.error(error);
-      setMessage(
-        error instanceof Error ? error.message : "Detection failed."
-      );
+      setMessage(error instanceof Error ? error.message : "Detection failed.");
     } finally {
       setLoading(false);
       setActiveOperation("");
     }
   }
 
-
   // ============================================================
   // 5. Human QC Accept / Reject
   // ============================================================
-
   async function handleQCAction(action: "accept" | "reject") {
     if (!selectedFeature) return;
 
@@ -368,12 +311,11 @@ function App() {
       setSelectedFeature((prev: any) => ({
         ...prev,
         properties: {
-          ...prev.properties,
+          ...prev?.properties,
           qc_status: authoritativeStatus,
         },
       }));
 
-      // Update layerGeoJSON feature list so map instantly reflects QC color
       if (layerGeoJSON && Array.isArray(layerGeoJSON.features)) {
         const updatedFeatures = layerGeoJSON.features.map((f: any) => {
           if ((f.properties?.feature_id || f.id) === featureId) {
@@ -395,27 +337,25 @@ function App() {
       }
 
       if (authoritativeStatus === "accepted") {
-        setQcFeedback({ message: `✓ Feature #${featureId} accepted successfully.`, type: "success" });
+        setQcFeedback({ message: `Feature #${featureId} accepted.`, type: "success" });
       } else {
-        setQcFeedback({ message: `✕ Feature #${featureId} rejected successfully.`, type: "success" });
+        setQcFeedback({ message: `Feature #${featureId} rejected.`, type: "error" });
       }
 
       setMessage(`Feature #${featureId} marked as ${authoritativeStatus.toUpperCase()}.`);
     } catch (error) {
       console.error(error);
       const errMsg = error instanceof Error ? error.message : `Failed to ${action} feature.`;
-      setQcFeedback({ message: `❌ ${errMsg}`, type: "error" });
+      setQcFeedback({ message: errMsg, type: "error" });
       setMessage(errMsg);
     } finally {
       setQcActionLoading(false);
     }
   }
 
-
   // ============================================================
   // 6. Download GeoJSON Export
   // ============================================================
-
   async function handleDownloadGeoJSON() {
     const layerToExport = selectedLayer || (layers.length > 0 ? layers[0].layer_name : "");
     if (!layerToExport) {
@@ -424,7 +364,7 @@ function App() {
     }
 
     setExporting(true);
-    setMessage(`Preparing GeoJSON export for ${layerToExport}...`);
+    setMessage(`Preparing GeoJSON export for "${layerToExport}"...`);
 
     try {
       const exportUrl = `${API_URL}/layers/${layerToExport}/export?format=geojson`;
@@ -445,141 +385,250 @@ function App() {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(downloadUrl);
 
-      setMessage(`GeoJSON file for ${layerToExport} downloaded successfully.`);
+      setMessage(`GeoJSON file for "${layerToExport}" downloaded successfully.`);
     } catch (error) {
       console.error(error);
-      setMessage(
-        error instanceof Error ? error.message : "GeoJSON export failed."
-      );
+      setMessage(error instanceof Error ? error.message : "GeoJSON export failed.");
     } finally {
       setExporting(false);
     }
   }
 
-
-  // Shared Button Style Helper
-  function buttonStyle(enabled: boolean, background: string): React.CSSProperties {
-    return {
-      background: enabled ? background : "#9aa9a4",
-      color: "white",
-      border: "none",
-      borderRadius: "8px",
-      padding: "11px 18px",
-      cursor: enabled ? "pointer" : "not-allowed",
-      fontSize: "14px",
-      fontWeight: "bold",
-    };
-  }
-
-
   // ============================================================
-  // UI Rendering
+  // UI Layout & Render
   // ============================================================
-
   return (
-    <div style={{ minHeight: "100vh", background: "#f4f7f6", fontFamily: "Arial, sans-serif" }}>
-
-      {/* Header */}
-      <header style={{ background: "#173f35", color: "white", padding: "18px 32px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: "28px" }}>Naksha</h1>
-          <p style={{ margin: "6px 0 0", opacity: 0.85 }}>AI-Powered Orthophoto Digitization Platform</p>
+    <div style={{ minHeight: "100vh", backgroundColor: "#f5f5f7", color: "#1d1d1f" }}>
+      {/* ------------------------------------------------------------
+          Global Header (Apple Design System Nav Bar)
+         ------------------------------------------------------------ */}
+      <header
+        style={{
+          backgroundColor: "rgba(255, 255, 255, 0.85)",
+          backdropFilter: "blur(20px)",
+          WebkitBackdropFilter: "blur(20px)",
+          borderBottom: "1px solid #e5e5e7",
+          position: "sticky",
+          top: 0,
+          zIndex: 1000,
+          padding: "14px 28px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <span style={{ fontSize: "20px", fontWeight: "700", letterSpacing: "-0.5px", color: "#1d1d1f" }}>
+            Naksha
+          </span>
+          <span
+            style={{
+              fontSize: "11px",
+              fontWeight: "600",
+              textTransform: "uppercase",
+              letterSpacing: "0.5px",
+              backgroundColor: "#f2f2f7",
+              color: "#86868b",
+              padding: "4px 8px",
+              borderRadius: "9999px",
+              border: "1px solid #e5e5e7",
+            }}
+          >
+            AI Platform
+          </span>
         </div>
 
-        {/* Global Export Button */}
         <button
           onClick={handleDownloadGeoJSON}
           disabled={exporting || (!selectedLayer && layers.length === 0)}
           style={{
-            background: "#00a86b",
-            color: "white",
+            backgroundColor: "#0066cc",
+            color: "#ffffff",
             border: "none",
-            borderRadius: "8px",
-            padding: "12px 22px",
-            fontSize: "14px",
-            fontWeight: "bold",
-            cursor: exporting ? "wait" : "pointer",
-            boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
+            borderRadius: "9999px",
+            padding: "9px 18px",
+            fontSize: "13px",
+            fontWeight: "500",
+            cursor: exporting || (!selectedLayer && layers.length === 0) ? "not-allowed" : "pointer",
+            opacity: exporting || (!selectedLayer && layers.length === 0) ? 0.5 : 1,
+            transition: "all 0.15s ease",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.04)",
           }}
         >
-          {exporting ? "Preparing Export..." : "📥 Download GeoJSON"}
+          {exporting ? "Preparing Export..." : "Export GeoJSON"}
         </button>
       </header>
 
-      {/* Main Container */}
-      <main style={{ padding: "24px", maxWidth: "1400px", margin: "0 auto" }}>
+      {/* ------------------------------------------------------------
+          Main Workspace Area
+         ------------------------------------------------------------ */}
+      <main style={{ maxWidth: "1440px", margin: "0 auto", padding: "28px 24px 48px" }}>
+        
+        {/* Orthophoto AI Control Surface Card */}
+        <section
+          style={{
+            backgroundColor: "#ffffff",
+            borderRadius: "16px",
+            padding: "24px 28px",
+            marginBottom: "24px",
+            border: "1px solid #e5e5e7",
+            boxShadow: "0 2px 8px rgba(0, 0, 0, 0.04)",
+          }}
+        >
+          <div style={{ marginBottom: "20px" }}>
+            <h1 style={{ margin: "0 0 4px 0", fontSize: "21px", fontWeight: "600", letterSpacing: "-0.3px" }}>
+              Orthophoto AI Digitization
+            </h1>
+            <p style={{ margin: 0, fontSize: "14px", color: "#86868b" }}>
+              Select an orthophoto file, choose the target feature layer, and execute automated AI segmentation.
+            </p>
+          </div>
 
-        {/* Upload & AI Analysis Control Panel */}
-        <section style={{ background: "white", borderRadius: "12px", padding: "22px", marginBottom: "20px", boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
-          <h2 style={{ marginTop: 0, fontSize: "20px" }}>Orthophoto AI Analysis</h2>
-          <p style={{ color: "#555", margin: "0 0 16px 0", fontSize: "14px" }}>
-            Upload an orthophoto (.tif, .tiff), select the target feature type, and run automated AI detection.
-          </p>
-
-          <div style={{ display: "flex", gap: "20px", alignItems: "flex-end", flexWrap: "wrap", marginBottom: "16px" }}>
-            {/* File Upload */}
+          <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+            {/* Step 1: Feature Type Segmented Pill Control */}
             <div>
-              <label style={{ display: "block", marginBottom: "6px", fontWeight: "bold", fontSize: "14px", color: "#333" }}>
-                1. Select Orthophoto Image
+              <label style={{ display: "block", fontSize: "12px", fontWeight: "600", color: "#86868b", letterSpacing: "0.4px", marginBottom: "8px", textTransform: "uppercase" }}>
+                Target Feature Type
               </label>
-              <input
-                type="file"
-                accept=".tif,.tiff,.png,.jpg,.jpeg"
-                onChange={handleFileChange}
-                disabled={uploading || loading}
-                style={{ fontSize: "14px" }}
-              />
-            </div>
-
-            {/* Feature Type Selector */}
-            <div>
-              <label style={{ display: "block", marginBottom: "6px", fontWeight: "bold", fontSize: "14px", color: "#333" }}>
-                2. Select Feature Type
-              </label>
-              <select
-                value={selectedFeatureType}
-                onChange={(e) => setSelectedFeatureType(e.target.value)}
-                disabled={loading}
-                style={{ padding: "10px 14px", borderRadius: "6px", border: "1px solid #ccc", fontSize: "14px", minWidth: "160px" }}
+              <div
+                style={{
+                  display: "inline-flex",
+                  gap: "4px",
+                  backgroundColor: "#f2f2f7",
+                  padding: "4px",
+                  borderRadius: "9999px",
+                  border: "1px solid #e5e5e7",
+                  flexWrap: "wrap",
+                }}
               >
-                <option value="buildings">Buildings</option>
-                <option value="roads">Roads</option>
-                <option value="trees">Trees</option>
-                <option value="water">Water</option>
-                <option value="lulc">LULC</option>
-                <option value="fields">Fields</option>
-              </select>
+                {FEATURE_TYPES.map((type) => {
+                  const isActive = selectedFeatureType === type.id;
+                  return (
+                    <button
+                      key={type.id}
+                      onClick={() => setSelectedFeatureType(type.id)}
+                      disabled={loading}
+                      style={{
+                        backgroundColor: isActive ? "#ffffff" : "transparent",
+                        color: isActive ? "#0066cc" : "#1d1d1f",
+                        border: "none",
+                        borderRadius: "9999px",
+                        padding: "7px 16px",
+                        fontSize: "13px",
+                        fontWeight: isActive ? "600" : "500",
+                        cursor: loading ? "not-allowed" : "pointer",
+                        boxShadow: isActive ? "0 2px 8px rgba(0, 0, 0, 0.04)" : "none",
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      {type.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            {/* Run Detection Button */}
-            <div>
+            {/* Step 2: File Selector & Action Controls */}
+            <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <label
+                  htmlFor="orthophoto-upload"
+                  style={{
+                    backgroundColor: "#f2f2f7",
+                    color: "#1d1d1f",
+                    border: "1px solid #e5e5e7",
+                    borderRadius: "8px",
+                    padding: "9px 16px",
+                    fontSize: "13px",
+                    fontWeight: "500",
+                    cursor: uploading || loading ? "not-allowed" : "pointer",
+                    display: "inline-block",
+                  }}
+                >
+                  {file ? "Change Image" : "Choose Image (.tif)"}
+                </label>
+                <input
+                  id="orthophoto-upload"
+                  type="file"
+                  accept=".tif,.tiff,.png,.jpg,.jpeg"
+                  onChange={handleFileChange}
+                  disabled={uploading || loading}
+                  style={{ display: "none" }}
+                />
+                {file && (
+                  <span style={{ fontSize: "13px", color: "#86868b", maxWidth: "240px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {file.name}
+                  </span>
+                )}
+              </div>
+
               <button
                 onClick={handleRunDetection}
                 disabled={!file || loading || uploading}
-                style={buttonStyle(Boolean(file) && !loading && !uploading, "#1f6f5b")}
+                style={{
+                  backgroundColor: !file || loading || uploading ? "#e5e5e7" : "#0066cc",
+                  color: !file || loading || uploading ? "#86868b" : "#ffffff",
+                  border: "none",
+                  borderRadius: "9999px",
+                  padding: "10px 22px",
+                  fontSize: "14px",
+                  fontWeight: "500",
+                  cursor: !file || loading || uploading ? "not-allowed" : "pointer",
+                  transition: "all 0.15s ease",
+                  boxShadow: !file || loading || uploading ? "none" : "0 2px 8px rgba(0, 0, 0, 0.04)",
+                }}
               >
-                {loading ? "Running AI Detection..." : "⚡ Run Detection"}
+                {loading ? "Processing AI Detection..." : "Run AI Detection"}
               </button>
             </div>
           </div>
 
-          {/* System Status Banner */}
-          <div style={{ padding: "12px 14px", background: "#eef7f3", borderRadius: "8px", color: "#285f4d", fontSize: "14px" }}>
+          {/* System Notification Pill */}
+          <div
+            style={{
+              marginTop: "20px",
+              padding: "10px 16px",
+              backgroundColor: "#e8f2ff",
+              borderRadius: "8px",
+              color: "#0066cc",
+              fontSize: "13px",
+              fontWeight: "500",
+              border: "1px solid #cce0ff",
+            }}
+          >
             {message}
           </div>
         </section>
 
-        {/* Map & Inspection Split Layout */}
-        <div style={{ display: "grid", gridTemplateColumns: selectedFeature ? "1fr 350px" : "1fr", gap: "20px" }}>
+        {/* ------------------------------------------------------------
+            Map & Review Panel Split Workbench
+           ------------------------------------------------------------ */}
+        <div style={{ display: "grid", gridTemplateColumns: selectedFeature ? "1fr 380px" : "1fr", gap: "24px" }}>
+          
+          {/* Map Viewport Container */}
+          <section
+            style={{
+              backgroundColor: "#ffffff",
+              borderRadius: "16px",
+              padding: "20px",
+              border: "1px solid #e5e5e7",
+              boxShadow: "0 4px 16px rgba(0, 0, 0, 0.06)",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            {/* Map Header & PostGIS Selector Bar */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <h2 style={{ margin: 0, fontSize: "17px", fontWeight: "600" }}>AI Detection Map</h2>
+                {layerLoading && (
+                  <span style={{ fontSize: "12px", color: "#0066cc", fontWeight: "500" }}>Loading layer...</span>
+                )}
+              </div>
 
-          {/* Map Container */}
-          <section style={{ background: "white", borderRadius: "12px", padding: "16px", boxShadow: "0 2px 10px rgba(0,0,0,0.08)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "10px" }}>
-              <h2 style={{ margin: 0, fontSize: "20px" }}>AI Detection Map</h2>
-
-              {/* PostGIS Layer Dropdown & Export Button */}
-              <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                <label style={{ fontSize: "14px", fontWeight: "bold", color: "#444" }}>PostGIS Layer:</label>
+              {/* PostGIS Layer Dropdown */}
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <label style={{ fontSize: "13px", color: "#86868b", fontWeight: "500" }}>PostGIS Layer:</label>
                 <select
                   value={selectedLayer}
                   onChange={(e) => {
@@ -587,7 +636,17 @@ function App() {
                     setSelectedLayer(value);
                     loadPostGISLayer(value);
                   }}
-                  style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid #ccc", minWidth: "260px", fontSize: "14px" }}
+                  style={{
+                    backgroundColor: "#f2f2f7",
+                    color: "#1d1d1f",
+                    border: "1px solid #e5e5e7",
+                    borderRadius: "8px",
+                    padding: "7px 12px",
+                    fontSize: "13px",
+                    fontWeight: "500",
+                    minWidth: "260px",
+                    outline: "none",
+                  }}
                 >
                   <option value="" disabled>Select a PostGIS layer</option>
                   {layers.map((layer) => (
@@ -596,217 +655,257 @@ function App() {
                     </option>
                   ))}
                 </select>
-
-                {layerLoading && <span style={{ fontSize: "13px", color: "#666" }}>Loading...</span>}
-
-                {/* Layer GeoJSON Export */}
-                <button
-                  onClick={handleDownloadGeoJSON}
-                  disabled={exporting || (!selectedLayer && layers.length === 0)}
-                  style={{
-                    background: "#285f8f",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "6px",
-                    padding: "8px 14px",
-                    fontSize: "13px",
-                    fontWeight: "bold",
-                    cursor: "pointer",
-                  }}
-                >
-                  Download GeoJSON
-                </button>
               </div>
             </div>
 
-            <div style={{ padding: "8px 12px", background: "#eef7f3", borderRadius: "6px", color: "#285f4d", fontSize: "13px", fontWeight: "bold", marginBottom: "12px" }}>
-              💡 Click a detected feature on the map to review it.
+            {/* Instruction Tip */}
+            <div
+              style={{
+                padding: "8px 14px",
+                backgroundColor: "#f2f2f7",
+                borderRadius: "8px",
+                color: "#1d1d1f",
+                fontSize: "12px",
+                fontWeight: "500",
+                marginBottom: "16px",
+                border: "1px solid #e5e5e7",
+              }}
+            >
+              Select any detected feature polygon on the map to review details, view AI confidence scores, and perform human QC verification.
             </div>
 
-            {/* Leaflet Map */}
-            <MapContainer
-              center={mapBounds ? undefined : [46.6578, 16.1166]}
-              zoom={17}
-              bounds={mapBounds ? mapBounds : undefined}
-              style={{ height: "640px", width: "100%", borderRadius: "8px" }}
-            >
-              <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-              <TileLayer
-                url="http://127.0.0.1:8080/cog/tiles/WebMercatorQuad/{z}/{x}/{y}?url=%2Fdata%2Fraw%2Fdemo_aoi%2Fdemo_aoi_cog.tif&tilesize=512"
-                minZoom={17}
-                maxZoom={22}
-                opacity={0.85}
-              />
-
-              {/* GeoJSON PostGIS Detections Render */}
-              {layerGeoJSON && (
-                <GeoJSON
-                  key={`${selectedLayer}-${layerGeoJSON?.features?.length || 0}`}
-                  data={layerGeoJSON}
-                  style={(feat: any) => {
-                    const featId = feat?.properties?.feature_id || feat?.id;
-                    const selId = selectedFeature?.properties?.feature_id || selectedFeature?.id;
-                    const isSelected = selId != null && featId === selId;
-
-                    const status = feat?.properties?.qc_status;
-                    let stroke = "#7b2cbf";
-                    let fill = "#9d4edd";
-                    if (status === "accepted") {
-                      stroke = "#2e7d32";
-                      fill = "#4caf50";
-                    } else if (status === "rejected") {
-                      stroke = "#c62828";
-                      fill = "#ef5350";
-                    }
-                    return {
-                      color: isSelected ? "#ff9800" : stroke,
-                      weight: isSelected ? 4 : 2,
-                      fillColor: fill,
-                      fillOpacity: isSelected ? 0.5 : 0.3,
-                    };
-                  }}
-                  onEachFeature={(feat: any, layer: any) => {
-                    const props = feat.properties || {};
-                    const confText = props.confidence != null ? `${(props.confidence * 100).toFixed(0)}%` : "Unavailable";
-                    layer.bindPopup(`
-                      <div style="font-family: Arial, sans-serif;">
-                        <strong style="color: #173f35; font-size: 14px;">${props.feature_type || "Feature"}</strong><br/>
-                        Feature ID: #${props.feature_id || feat.id || "N/A"}<br/>
-                        AI Confidence: <strong>${confText}</strong><br/>
-                        QC Status: <strong>${props.qc_status ? props.qc_status.charAt(0).toUpperCase() + props.qc_status.slice(1) : "Pending"}</strong>
-                      </div>
-                    `);
-                    layer.on({
-                      click: () => {
-                        setSelectedFeature(feat);
-                      },
-                    });
-                  }}
+            {/* Leaflet Map Frame */}
+            <div style={{ height: "640px", width: "100%", borderRadius: "12px", overflow: "hidden", border: "1px solid #e5e5e7" }}>
+              <MapContainer
+                center={mapBounds ? undefined : [46.6578, 16.1166]}
+                zoom={17}
+                bounds={mapBounds ? mapBounds : undefined}
+                style={{ height: "100%", width: "100%" }}
+              >
+                <TileLayer attribution='&copy; OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                <TileLayer
+                  url="http://127.0.0.1:8080/cog/tiles/WebMercatorQuad/{z}/{x}/{y}?url=%2Fdata%2Fraw%2Fdemo_aoi%2Fdemo_aoi_cog.tif&tilesize=512"
+                  minZoom={17}
+                  maxZoom={22}
+                  opacity={0.85}
                 />
-              )}
-            </MapContainer>
+
+                {layerGeoJSON && (
+                  <GeoJSON
+                    key={`${selectedLayer}-${layerGeoJSON?.features?.length || 0}`}
+                    data={layerGeoJSON}
+                    style={(feat: any) => {
+                      const featId = feat?.properties?.feature_id || feat?.id;
+                      const selId = selectedFeature?.properties?.feature_id || selectedFeature?.id;
+                      const isSelected = selId != null && featId === selId;
+
+                      const status = feat?.properties?.qc_status;
+                      let stroke = "#0066cc";
+                      let fill = "#0066cc";
+                      if (status === "accepted") {
+                        stroke = "#28cd41";
+                        fill = "#28cd41";
+                      } else if (status === "rejected") {
+                        stroke = "#ff3b30";
+                        fill = "#ff3b30";
+                      }
+                      return {
+                        color: isSelected ? "#ff9500" : stroke,
+                        weight: isSelected ? 4 : 2,
+                        fillColor: fill,
+                        fillOpacity: isSelected ? 0.5 : 0.25,
+                      };
+                    }}
+                    onEachFeature={(feat: any, layer: any) => {
+                      const props = feat.properties || {};
+                      const confText = props.confidence != null ? `${(props.confidence * 100).toFixed(0)}%` : "Unavailable";
+                      layer.bindPopup(`
+                        <div style="font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; padding: 4px;">
+                          <strong style="color: #1d1d1f; font-size: 14px;">${props.feature_type || "Feature"}</strong><br/>
+                          <span style="font-size: 12px; color: #86868b;">ID: #${props.feature_id || feat.id || "N/A"}</span><br/>
+                          <span style="font-size: 12px; color: #1d1d1f;">AI Confidence: <strong>${confText}</strong></span><br/>
+                          <span style="font-size: 12px; color: #86868b;">QC Status: <strong>${props.qc_status ? props.qc_status.charAt(0).toUpperCase() + props.qc_status.slice(1) : "Pending"}</strong></span>
+                        </div>
+                      `);
+                      layer.on({
+                        click: () => {
+                          setSelectedFeature(feat);
+                        },
+                      });
+                    }}
+                  />
+                )}
+              </MapContainer>
+            </div>
           </section>
 
-          {/* Feature Review Panel */}
+          {/* ------------------------------------------------------------
+              Feature Review Sidebar Panel
+             ------------------------------------------------------------ */}
           {selectedFeature && (
-            <aside style={{ background: "white", borderRadius: "12px", padding: "20px", boxShadow: "0 2px 10px rgba(0,0,0,0.08)", display: "flex", flexDirection: "column", gap: "16px" }}>
+            <aside
+              style={{
+                backgroundColor: "#ffffff",
+                borderRadius: "16px",
+                padding: "24px",
+                border: "1px solid #e5e5e7",
+                boxShadow: "0 4px 16px rgba(0, 0, 0, 0.06)",
+                display: "flex",
+                flexDirection: "column",
+                gap: "20px",
+              }}
+            >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <h3 style={{ margin: 0, fontSize: "18px", color: "#173f35" }}>Feature Review</h3>
+                <h3 style={{ margin: 0, fontSize: "17px", fontWeight: "600" }}>Feature Review</h3>
                 <button
                   onClick={() => setSelectedFeature(null)}
-                  style={{ background: "none", border: "none", fontSize: "18px", cursor: "pointer", color: "#888" }}
+                  style={{
+                    backgroundColor: "#f2f2f7",
+                    border: "none",
+                    borderRadius: "9999px",
+                    width: "28px",
+                    height: "28px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "14px",
+                    cursor: "pointer",
+                    color: "#86868b",
+                  }}
                 >
                   ✕
                 </button>
               </div>
 
-              {/* Feature Details */}
-              <div style={{ background: "#f8f9fa", borderRadius: "8px", padding: "14px", fontSize: "14px" }}>
-                <p style={{ margin: "0 0 8px 0" }}>
-                  <strong>Feature ID:</strong> #{selectedFeature.properties?.feature_id || selectedFeature.id || "N/A"}
-                </p>
-                <p style={{ margin: "0 0 8px 0" }}>
-                  <strong>Layer:</strong> {selectedFeature.properties?.layer_name || selectedLayer || "N/A"}
-                </p>
-                <p style={{ margin: "0 0 8px 0" }}>
-                  <strong>Feature Type:</strong> {selectedFeature.properties?.feature_type || "N/A"}
-                </p>
-                <p style={{ margin: 0 }}>
-                  <strong>Source Model:</strong> {selectedFeature.properties?.source_model || "N/A"}
-                </p>
+              {/* Feature Details Section */}
+              <div style={{ backgroundColor: "#fbfbfd", borderRadius: "12px", padding: "16px", border: "1px solid #e5e5e7", fontSize: "13px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <span style={{ color: "#86868b" }}>Feature ID</span>
+                  <span style={{ fontWeight: "600" }}>#{selectedFeature.properties?.feature_id || selectedFeature.id || "N/A"}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <span style={{ color: "#86868b" }}>Layer Name</span>
+                  <span style={{ fontWeight: "600" }}>{selectedFeature.properties?.layer_name || selectedLayer || "N/A"}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <span style={{ color: "#86868b" }}>Feature Type</span>
+                  <span style={{ fontWeight: "600", textTransform: "capitalize" }}>{selectedFeature.properties?.feature_type || "N/A"}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "#86868b" }}>Source Model</span>
+                  <span style={{ fontWeight: "600" }}>{selectedFeature.properties?.source_model || "N/A"}</span>
+                </div>
               </div>
 
-              {/* Confidence Indicator */}
-              <div style={{ background: "#eef7f3", borderRadius: "8px", padding: "14px" }}>
-                <label style={{ display: "block", fontSize: "13px", color: "#555", marginBottom: "6px", fontWeight: "bold" }}>
-                  AI Confidence
+              {/* Real AI Confidence Indicator Section */}
+              <div style={{ backgroundColor: "#fbfbfd", borderRadius: "12px", padding: "16px", border: "1px solid #e5e5e7" }}>
+                <label style={{ display: "block", fontSize: "12px", color: "#86868b", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: "8px" }}>
+                  AI Confidence Score
                 </label>
+
                 {selectedFeature.properties?.confidence != null ? (
                   <div>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "6px" }}>
-                      <span style={{ fontSize: "24px", fontWeight: "bold", color: "#173f35" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "8px" }}>
+                      <span style={{ fontSize: "28px", fontWeight: "700", color: "#1d1d1f", letterSpacing: "-0.5px" }}>
                         {(selectedFeature.properties.confidence * 100).toFixed(0)}%
                       </span>
-                      <span style={{ fontSize: "12px", color: "#666" }}>
+                      <span style={{ fontSize: "12px", color: "#86868b" }}>
                         ({selectedFeature.properties.confidence.toFixed(4)})
                       </span>
                     </div>
+
                     {/* Progress Bar */}
-                    <div style={{ height: "8px", background: "#ddd", borderRadius: "4px", overflow: "hidden" }}>
+                    <div style={{ height: "6px", backgroundColor: "#e5e5e7", borderRadius: "9999px", overflow: "hidden" }}>
                       <div
                         style={{
                           height: "100%",
                           width: `${Math.min(100, Math.max(0, selectedFeature.properties.confidence * 100))}%`,
-                          background:
+                          backgroundColor:
                             selectedFeature.properties.confidence > 0.75
-                              ? "#00a86b"
+                              ? "#28cd41"
                               : selectedFeature.properties.confidence > 0.5
-                              ? "#f5a623"
-                              : "#d9534f",
+                              ? "#ff9500"
+                              : "#ff3b30",
+                          borderRadius: "9999px",
+                          transition: "width 0.3s ease",
                         }}
                       />
                     </div>
                   </div>
                 ) : (
-                  <div style={{ padding: "8px 12px", background: "#e0e0e0", borderRadius: "6px", color: "#555", fontSize: "13px", textAlign: "center", fontWeight: "bold" }}>
+                  <div style={{ padding: "8px 12px", backgroundColor: "#f2f2f7", borderRadius: "8px", color: "#86868b", fontSize: "13px", textAlign: "center", fontWeight: "500" }}>
                     AI Confidence: Unavailable
                   </div>
                 )}
               </div>
 
-              {/* Human QC Action Panel */}
-              <div style={{ background: "#fafafa", borderRadius: "8px", padding: "14px", border: "1px solid #eee" }}>
-                <label style={{ display: "block", fontSize: "13px", color: "#555", marginBottom: "8px", fontWeight: "bold" }}>
+              {/* Human Quality Control Verification Panel */}
+              <div style={{ backgroundColor: "#fbfbfd", borderRadius: "12px", padding: "16px", border: "1px solid #e5e5e7" }}>
+                <label style={{ display: "block", fontSize: "12px", color: "#86868b", fontWeight: "600", textTransform: "uppercase", letterSpacing: "0.4px", marginBottom: "8px" }}>
                   Human QC Verification
                 </label>
 
-                <div style={{ marginBottom: "12px", fontSize: "14px" }}>
-                  Current Status:{" "}
-                  <strong style={{
-                    color: selectedFeature.properties?.qc_status === "accepted"
-                      ? "#2e7d32"
-                      : selectedFeature.properties?.qc_status === "rejected"
-                      ? "#c62828"
-                      : "#f5a623",
-                  }}>
+                <div style={{ marginBottom: "12px", fontSize: "13px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: "#86868b" }}>Current Status</span>
+                  <span
+                    style={{
+                      fontWeight: "600",
+                      padding: "3px 10px",
+                      borderRadius: "9999px",
+                      fontSize: "12px",
+                      backgroundColor:
+                        selectedFeature.properties?.qc_status === "accepted"
+                          ? "#eafaf1"
+                          : selectedFeature.properties?.qc_status === "rejected"
+                          ? "#ffebeb"
+                          : "#fff7e6",
+                      color:
+                        selectedFeature.properties?.qc_status === "accepted"
+                          ? "#28cd41"
+                          : selectedFeature.properties?.qc_status === "rejected"
+                          ? "#ff3b30"
+                          : "#ff9500",
+                    }}
+                  >
                     {selectedFeature.properties?.qc_status
                       ? selectedFeature.properties.qc_status.charAt(0).toUpperCase() + selectedFeature.properties.qc_status.slice(1)
                       : "Pending"}
-                  </strong>
+                  </span>
                 </div>
 
-                {/* QC Feedback Banner */}
+                {/* Feedback Toast */}
                 {qcFeedback && (
                   <div
                     style={{
                       padding: "8px 12px",
-                      borderRadius: "6px",
-                      fontSize: "13px",
-                      fontWeight: "bold",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                      fontWeight: "500",
                       marginBottom: "12px",
-                      background: qcFeedback.type === "success" ? "#e8f5e9" : "#ffebee",
-                      color: qcFeedback.type === "success" ? "#2e7d32" : "#c62828",
-                      border: `1px solid ${qcFeedback.type === "success" ? "#c8e6c9" : "#ffcdd2"}`,
+                      backgroundColor: qcFeedback.type === "success" ? "#eafaf1" : "#ffebeb",
+                      color: qcFeedback.type === "success" ? "#28cd41" : "#ff3b30",
+                      border: `1px solid ${qcFeedback.type === "success" ? "#c3f2d2" : "#ffd1d1"}`,
                     }}
                   >
                     {qcFeedback.message}
                   </div>
                 )}
 
+                {/* Action Buttons */}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
                   <button
                     onClick={() => handleQCAction("accept")}
                     disabled={qcActionLoading || selectedFeature.properties?.qc_status === "accepted"}
                     style={{
-                      background: selectedFeature.properties?.qc_status === "accepted" ? "#a5d6a7" : "#2e7d32",
-                      color: "white",
+                      backgroundColor: selectedFeature.properties?.qc_status === "accepted" ? "#f2f2f7" : "#28cd41",
+                      color: selectedFeature.properties?.qc_status === "accepted" ? "#86868b" : "#ffffff",
                       border: "none",
-                      borderRadius: "6px",
-                      padding: "10px",
-                      fontSize: "14px",
-                      fontWeight: "bold",
-                      cursor: (qcActionLoading || selectedFeature.properties?.qc_status === "accepted") ? "not-allowed" : "pointer",
-                      opacity: selectedFeature.properties?.qc_status === "accepted" ? 0.7 : 1,
+                      borderRadius: "9999px",
+                      padding: "9px",
+                      fontSize: "13px",
+                      fontWeight: "500",
+                      cursor: qcActionLoading || selectedFeature.properties?.qc_status === "accepted" ? "not-allowed" : "pointer",
+                      transition: "all 0.15s ease",
                     }}
                   >
                     ✓ Accept
@@ -816,15 +915,15 @@ function App() {
                     onClick={() => handleQCAction("reject")}
                     disabled={qcActionLoading || selectedFeature.properties?.qc_status === "rejected"}
                     style={{
-                      background: selectedFeature.properties?.qc_status === "rejected" ? "#ef9a9a" : "#c62828",
-                      color: "white",
+                      backgroundColor: selectedFeature.properties?.qc_status === "rejected" ? "#f2f2f7" : "#ff3b30",
+                      color: selectedFeature.properties?.qc_status === "rejected" ? "#86868b" : "#ffffff",
                       border: "none",
-                      borderRadius: "6px",
-                      padding: "10px",
-                      fontSize: "14px",
-                      fontWeight: "bold",
-                      cursor: (qcActionLoading || selectedFeature.properties?.qc_status === "rejected") ? "not-allowed" : "pointer",
-                      opacity: selectedFeature.properties?.qc_status === "rejected" ? 0.7 : 1,
+                      borderRadius: "9999px",
+                      padding: "9px",
+                      fontSize: "13px",
+                      fontWeight: "500",
+                      cursor: qcActionLoading || selectedFeature.properties?.qc_status === "rejected" ? "not-allowed" : "pointer",
+                      transition: "all 0.15s ease",
                     }}
                   >
                     ✕ Reject
@@ -839,7 +938,7 @@ function App() {
   );
 }
 
-// React Root
+// React Root Mount
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />
