@@ -149,6 +149,7 @@ function App() {
   // Selected Feature for QC & Confidence
   const [selectedFeature, setSelectedFeature] = useState<any | null>(null);
   const [qcActionLoading, setQcActionLoading] = useState(false);
+  const [qcFeedback, setQcFeedback] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   // GeoJSON Export State
   const [exporting, setExporting] = useState(false);
@@ -184,11 +185,13 @@ function App() {
     if (!layerName) {
       setLayerGeoJSON(null);
       setSelectedFeature(null);
+      setQcFeedback(null);
       return;
     }
 
     setLayerLoading(true);
     setSelectedFeature(null);
+    setQcFeedback(null);
 
     try {
       const response = await fetch(`${API_URL}/layers/${layerName}`);
@@ -225,6 +228,7 @@ function App() {
     const selectedFile = event.target.files?.[0] ?? null;
     setFile(selectedFile);
     setSelectedFeature(null);
+    setQcFeedback(null);
 
     if (selectedFile) {
       setMessage(`Selected file: ${selectedFile.name}. Uploading image to backend...`);
@@ -272,6 +276,7 @@ function App() {
     setActiveOperation(`Running ${selectedFeatureType} detection`);
     setMessage(`Uploading orthophoto and running ${selectedFeatureType} AI detection...`);
     setSelectedFeature(null);
+    setQcFeedback(null);
 
     try {
       const formData = new FormData();
@@ -345,6 +350,7 @@ function App() {
     if (!featureId) return;
 
     setQcActionLoading(true);
+    setQcFeedback(null);
 
     try {
       const response = await fetch(`${API_URL}/qc/${featureId}/${action}`, {
@@ -357,13 +363,13 @@ function App() {
         throw new Error(data?.detail || `Failed to ${action} feature.`);
       }
 
-      const newStatus = action === "accept" ? "accepted" : "rejected";
+      const authoritativeStatus = data.qc_status || (action === "accept" ? "accepted" : "rejected");
 
       setSelectedFeature((prev: any) => ({
         ...prev,
         properties: {
           ...prev.properties,
-          qc_status: newStatus,
+          qc_status: authoritativeStatus,
         },
       }));
 
@@ -375,7 +381,7 @@ function App() {
               ...f,
               properties: {
                 ...f.properties,
-                qc_status: newStatus,
+                qc_status: authoritativeStatus,
               },
             };
           }
@@ -388,12 +394,18 @@ function App() {
         });
       }
 
-      setMessage(`Feature #${featureId} marked as ${newStatus.toUpperCase()}.`);
+      if (authoritativeStatus === "accepted") {
+        setQcFeedback({ message: `✓ Feature #${featureId} accepted successfully.`, type: "success" });
+      } else {
+        setQcFeedback({ message: `✕ Feature #${featureId} rejected successfully.`, type: "success" });
+      }
+
+      setMessage(`Feature #${featureId} marked as ${authoritativeStatus.toUpperCase()}.`);
     } catch (error) {
       console.error(error);
-      setMessage(
-        error instanceof Error ? error.message : `Failed to ${action} feature.`
-      );
+      const errMsg = error instanceof Error ? error.message : `Failed to ${action} feature.`;
+      setQcFeedback({ message: `❌ ${errMsg}`, type: "error" });
+      setMessage(errMsg);
     } finally {
       setQcActionLoading(false);
     }
@@ -763,19 +775,38 @@ function App() {
                   </strong>
                 </div>
 
+                {/* QC Feedback Banner */}
+                {qcFeedback && (
+                  <div
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: "6px",
+                      fontSize: "13px",
+                      fontWeight: "bold",
+                      marginBottom: "12px",
+                      background: qcFeedback.type === "success" ? "#e8f5e9" : "#ffebee",
+                      color: qcFeedback.type === "success" ? "#2e7d32" : "#c62828",
+                      border: `1px solid ${qcFeedback.type === "success" ? "#c8e6c9" : "#ffcdd2"}`,
+                    }}
+                  >
+                    {qcFeedback.message}
+                  </div>
+                )}
+
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
                   <button
                     onClick={() => handleQCAction("accept")}
-                    disabled={qcActionLoading}
+                    disabled={qcActionLoading || selectedFeature.properties?.qc_status === "accepted"}
                     style={{
-                      background: "#2e7d32",
+                      background: selectedFeature.properties?.qc_status === "accepted" ? "#a5d6a7" : "#2e7d32",
                       color: "white",
                       border: "none",
                       borderRadius: "6px",
                       padding: "10px",
                       fontSize: "14px",
                       fontWeight: "bold",
-                      cursor: qcActionLoading ? "wait" : "pointer",
+                      cursor: (qcActionLoading || selectedFeature.properties?.qc_status === "accepted") ? "not-allowed" : "pointer",
+                      opacity: selectedFeature.properties?.qc_status === "accepted" ? 0.7 : 1,
                     }}
                   >
                     ✓ Accept
@@ -783,16 +814,17 @@ function App() {
 
                   <button
                     onClick={() => handleQCAction("reject")}
-                    disabled={qcActionLoading}
+                    disabled={qcActionLoading || selectedFeature.properties?.qc_status === "rejected"}
                     style={{
-                      background: "#c62828",
+                      background: selectedFeature.properties?.qc_status === "rejected" ? "#ef9a9a" : "#c62828",
                       color: "white",
                       border: "none",
                       borderRadius: "6px",
                       padding: "10px",
                       fontSize: "14px",
                       fontWeight: "bold",
-                      cursor: qcActionLoading ? "wait" : "pointer",
+                      cursor: (qcActionLoading || selectedFeature.properties?.qc_status === "rejected") ? "not-allowed" : "pointer",
+                      opacity: selectedFeature.properties?.qc_status === "rejected" ? 0.7 : 1,
                     }}
                   >
                     ✕ Reject
