@@ -23,12 +23,21 @@ class UnitedWorker(multiprocessing.Process):
         self.shm_weights = shared_memory.SharedMemory(name=shm_weight_name)
 
         # set postproc related args
-        mapping_dict, area_dict = postproc_args
+        if len(postproc_args) == 3:
+            mapping_dict, area_dict, conf_dict = postproc_args
+        else:
+            mapping_dict, area_dict = postproc_args
+            conf_dict = {}
         self.mapping_dict = mapping_dict
         self.area_dict = area_dict
+        self.conf_dict = conf_dict
 
         # set vectorization related args
-        raster_shape, region_begin, region_end, poly_config, srs_wkt = polygonize_args
+        if len(polygonize_args) == 6:
+            raster_shape, region_begin, region_end, poly_config, srs_wkt, conf_dict = polygonize_args
+        else:
+            raster_shape, region_begin, region_end, poly_config, srs_wkt = polygonize_args
+            conf_dict = self.conf_dict
         self.raster_shape = raster_shape
         self.region_begin = region_begin
         self.region_end = region_end
@@ -64,12 +73,12 @@ class UnitedWorker(multiprocessing.Process):
 
                 if mode == UnitedWorker.MODE_VECTORIZE:
                     _, vectorize_arg = arg
-                    PolygonizationWorker.polygonize(self.result_queue, self.shm_instances, self.raster_shape, vectorize_arg, self.poly_config, self.srs_wkt, self.region_begin, self.region_end)
+                    PolygonizationWorker.polygonize(self.result_queue, self.shm_instances, self.raster_shape, vectorize_arg, self.poly_config, self.srs_wkt, self.region_begin, self.region_end, self.conf_dict)
                     self.result_queue.put(None)
 
             # mode == UnitedWorker.MODE_POSTPROC
             if len(inner_queue) > 0:
                 entries = inner_queue.pop(0)
                 local_mapping_dict = {}
-                PostprocWorker.process_fields(entries, local_mapping_dict, self.area_dict, (self.shm_instances, instances_shape), (self.shm_weights, weight_shape), postproc_config)
+                PostprocWorker.process_fields(entries, local_mapping_dict, self.area_dict, self.conf_dict, (self.shm_instances, instances_shape), (self.shm_weights, weight_shape), postproc_config)
                 self.result_queue.put((self.id, local_mapping_dict))

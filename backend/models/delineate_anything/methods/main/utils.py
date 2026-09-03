@@ -34,4 +34,5 @@ def create_geopackage_with_same_projection(dst_path, layer_name, projection, ove
     layer.CreateField(ogr.FieldDefn("id", ogr.OFTInteger))
     layer.CreateField(ogr.FieldDefn("bg", ogr.OFSTBoolean))
     layer.CreateField(ogr.FieldDefn("area", ogr.OFTReal))
+    layer.CreateField(ogr.FieldDefn("confidence", ogr.OFTReal))
     return dst_path, layer_name

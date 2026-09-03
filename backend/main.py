@@ -1366,12 +1366,21 @@ override: null
                             if validated_geometry is None:
                                 continue
 
+                            conf_val = None
+                            if "confidence" in row and row["confidence"] is not None:
+                                try:
+                                    conf_float = float(row["confidence"])
+                                    if not math.isnan(conf_float):
+                                        conf_val = conf_float
+                                except Exception:
+                                    conf_val = None
+
                             cur.execute(
                                 create_feature_sql(
                                     layer_version_id=layer_version_id,
                                     feature_type="farms",
                                     geometry=validated_geometry,
-                                    confidence=None,
+                                    confidence=conf_val,
                                 )
                             )
                             features_stored += 1

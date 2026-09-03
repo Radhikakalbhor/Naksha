@@ -10,7 +10,7 @@ import numpy as np
 
 class PolygonizationWorker:
     @staticmethod
-    def polygonize(queue, shm_instances, raster_shape, geotransform, config, srs_wkt, region_begin, region_end):
+    def polygonize(queue, shm_instances, raster_shape, geotransform, config, srs_wkt, region_begin, region_end, conf_dict=None):
         instances = np.ndarray(shape=raster_shape, dtype=np.int32, buffer=shm_instances.buf)
 
         array = instances[region_begin[0]:region_end[0], region_begin[1]:region_end[1]]
@@ -89,7 +89,8 @@ class PolygonizationWorker:
             if isBackground:
                 result_id = -result_id
 
-            queue.put((ogr_geom.ExportToWkb(), float(area), result_id, int(isBackground)))
+            conf_val = conf_dict.get(abs(result_id), 0.85) if conf_dict else 0.85
+            queue.put((ogr_geom.ExportToWkb(), float(area), result_id, int(isBackground), float(conf_val)))
 
     @staticmethod
     def remove_holes(geom, min_hole_area, transform):

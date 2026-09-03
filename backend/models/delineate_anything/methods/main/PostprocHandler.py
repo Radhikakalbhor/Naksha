@@ -41,6 +41,7 @@ class PostprocHandler:
         self.manager = multiprocessing.Manager()
         self.mapping_dict = self.manager.dict({})
         self.area_dict = self.manager.dict({})
+        self.conf_dict = self.manager.dict({})
 
         # create shared raster targets
         instances_raster_byte_size = region_size[0] * region_size[1] * 4
@@ -118,65 +119,29 @@ class PostprocHandler:
             for j in range(0, data.shape[1], chunk_size):
                 i_min, i_max = max(0, i - halo), min(data.shape[0], i + chunk_size + halo)
                 j_min, j_max = max(0, j - halo), min(data.shape[1], j + chunk_size + halo)
-                
-                frag = data[i_min:i_max, j_min:j_max].copy()
+                chunk = data[i_min:i_max, j_min:j_max]
 
-                # 1. nullify border region
-                mx = ndimage.maximum_filter(frag, footprint=kernel)
-                mn = ndimage.minimum_filter(frag, footprint=kernel)
-                frag[mx != mn] = 0
+                unique_vals = np.unique(chunk)
+                unique_vals = unique_vals[unique_vals != 0]
 
-                # 2. fill gap
-                mx = ndimage.maximum_filter(frag, footprint=kernel)
-                frag[frag == 0] = mx[frag == 0]
-
-                # 3. fill gap 2
-                mx = ndimage.maximum_filter(frag, footprint=kernel)
-                frag[frag == 0] = mx[frag == 0]
-
-                # 4. remove overgrowth
-                zero_mask = (frag == 0).astype(np.uint8)
-                expanded_zeros = cv2.dilate(zero_mask, kernel.astype(np.uint8), borderType=cv2.BORDER_REPLICATE)
-                frag[expanded_zeros > 0] = 0
-
-                # 2. Determine slice to write back (skip the halo)
-                write_i_start = halo if i > 0 else 0
-                write_j_start = halo if j > 0 else 0
-                
-                actual_w = min(chunk_size, data.shape[0] - i)
-                actual_h = min(chunk_size, data.shape[1] - j)
-
-                data[i:i+actual_w, j:j+actual_h] = frag[write_i_start:write_i_start+actual_w, 
-                                                        write_j_start:write_j_start+actual_h]
+                for val in unique_vals:
+                    val_mask = (chunk == val)
+                    opened_mask = ndimage.binary_opening(val_mask, structure=kernel)
+                    chunk[val_mask & ~opened_mask] = 0
 
     def apply_background(self, background):
-        if background is None:
-            return
-
-        mask = self.instances_map < 2
-        self.instances_map[mask] = -background[mask]
+        background_mask = (self.instances_map == 0) & (background != 0)
+        self.instances_map[background_mask] = background[background_mask]
 
     def polygonize(self, geotransform, layer_info):
         t0 = time.time()
         gpkg_path, layer_name = layer_info
 
         workers_in_flight = 0
-        di = self.instances_map.shape[0] // self.num_workers_grid[0]
-        dj = self.instances_map.shape[1] // self.num_workers_grid[1]
-        # setup and start polygonization workers
         for i in range(self.num_workers_grid[0]):
             for j in range(self.num_workers_grid[1]):
-                local_gt = (
-                    geotransform[0] + geotransform[1] * (j * dj),
-                    geotransform[1],
-                    0,
-                    geotransform[3] + geotransform[5] * (i * di),
-                    0,
-                    geotransform[5]
-                )
-
-                worker = self.workers_grid[i][j]
-                worker.queue.put((UnitedWorker.MODE_VECTORIZE, local_gt))
+                process = self.workers_grid[i][j]
+                process.queue.put((UnitedWorker.MODE_VECTORIZE, geotransform))
                 workers_in_flight += 1
 
 
@@ -198,7 +163,12 @@ class PostprocHandler:
                         workers_in_flight -= 1
                         continue
 
-                    wkb, area, geom_id, isBackground = result
+                    if len(result) == 5:
+                        wkb, area, geom_id, isBackground, conf_val = result
+                    else:
+                        wkb, area, geom_id, isBackground = result
+                        conf_val = None
+
                     geom = ogr.CreateGeometryFromWkb(wkb)
                 
                     feature.SetFID(-1)
@@ -206,6 +176,8 @@ class PostprocHandler:
                     feature.SetField("id", geom_id)
                     feature.SetField("bg", isBackground)
                     feature.SetField("area", float(area))
+                    if conf_val is not None:
+                        feature.SetField("confidence", float(conf_val))
 
                     out_layer.CreateFeature(feature)
 
@@ -233,7 +205,7 @@ class PostprocHandler:
         self.workers_list = [None] * self.num_workers
         self.workers_load = np.zeros((self.num_workers), dtype="int32")
 
-        postproc_worker_args = (self.mapping_dict, self.area_dict)
+        postproc_worker_args = (self.mapping_dict, self.area_dict, self.conf_dict)
 
         self.result_queue = multiprocessing.Queue()
         self.workers_grid = [[None]*self.num_workers_grid[1] for _ in range(self.num_workers_grid[0])]
@@ -247,7 +219,7 @@ class PostprocHandler:
                 end_j = (begin_j + dj) if (j + 1) < self.num_workers_grid[1] else self.instances_map.shape[1] 
 
                 process_id = i * self.num_workers_grid[1] + j
-                vectorize_worker_args = (self.instances_map.shape, (begin_i, begin_j), (end_i, end_j), self.config_poly, self.srs_wkt)
+                vectorize_worker_args = (self.instances_map.shape, (begin_i, begin_j), (end_i, end_j), self.config_poly, self.srs_wkt, self.conf_dict)
                 process = UnitedWorker(process_id, self.result_queue, self.instances_shared_memory.name, self.weights_shared_memory.name, 
                                        postproc_worker_args, vectorize_worker_args)
                 process.start()

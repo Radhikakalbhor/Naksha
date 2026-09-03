@@ -358,7 +358,7 @@ def postdelineation_merge(layer_info, filter_config):
         dst_src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
         transform = osr.CoordinateTransformation(src_srs, dst_src)
-
+        has_conf_field = layer.GetLayerDefn().GetFieldIndex("confidence") != -1
         # filtering polygons, and collect polygons what require merge
         field_parts = {}
         features_to_delete = []
@@ -373,11 +373,17 @@ def postdelineation_merge(layer_info, filter_config):
                 continue
 
             orig_geom = feature.GetGeometryRef().Clone()
+            conf_val = feature.GetField("confidence") if has_conf_field else None
 
             if (id, bg) in field_parts:
-                field_parts[(id, bg)].append(orig_geom)
+                field_parts[(id, bg)]["geoms"].append(orig_geom)
+                if conf_val is not None:
+                    field_parts[(id, bg)]["confs"].append(conf_val)
             else:
-                field_parts[(id, bg)] = [orig_geom]
+                field_parts[(id, bg)] = {
+                    "geoms": [orig_geom],
+                    "confs": [conf_val] if conf_val is not None else []
+                }
 
             max_id = max(max_id, fid)
             features_to_delete.append(fid)
@@ -390,7 +396,7 @@ def postdelineation_merge(layer_info, filter_config):
         # merge features and add them to the layer
         for key in tqdm(field_parts.keys(), desc="Merging", unit="poly"):
             id, bg = key
-            cleaned_geoms = [g.Buffer(0) for g in field_parts[key] if g and not g.IsEmpty()]
+            cleaned_geoms = [g.Buffer(0) for g in field_parts[key]["geoms"] if g and not g.IsEmpty()]
             if not cleaned_geoms:
                 logger.debug(f"Skipping id={id}: no valid geometries after cleaning")
                 continue
@@ -413,6 +419,9 @@ def postdelineation_merge(layer_info, filter_config):
             else:
                 raise RuntimeError(f"Unexpected geometry type: {merged.GetGeometryName()}")
 
+            confs = field_parts[key]["confs"]
+            avg_conf = float(sum(confs) / len(confs)) if confs else None
+
             # Create one feature per polygon part
             for part in parts:
                 geom, area = PolygonizationWorker.remove_holes(part, MIN_HOLE_AREA, transform)
@@ -424,6 +433,8 @@ def postdelineation_merge(layer_info, filter_config):
                 out_feat.SetField("id", max_id + 1)
                 out_feat.SetField("bg", bg)
                 out_feat.SetField("area", float(area))
+                if has_conf_field and avg_conf is not None:
+                    out_feat.SetField("confidence", float(avg_conf))
                 layer.CreateFeature(out_feat)
                 max_id += 1
 

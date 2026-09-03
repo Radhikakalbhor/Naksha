@@ -340,7 +340,17 @@ override: null
                                 val_geom = validate_geometry(geom)
                                 if val_geom is None:
                                     continue
-                                cur.execute(create_feature_sql(layer_version_id, "farms", val_geom, confidence=0.85, source_model="delineate_anything"))
+
+                                conf_val = None
+                                if "confidence" in row and row["confidence"] is not None:
+                                    try:
+                                        conf_float = float(row["confidence"])
+                                        if not math.isnan(conf_float):
+                                            conf_val = conf_float
+                                    except Exception:
+                                        conf_val = None
+
+                                cur.execute(create_feature_sql(layer_version_id, "farms", val_geom, confidence=conf_val, source_model="delineate_anything"))
                                 features_stored += 1
                         conn.commit()
 

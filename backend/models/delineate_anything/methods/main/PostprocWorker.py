@@ -9,6 +9,7 @@ class PostprocWorker:
         masks = []
         bbox = []
         ids = []
+        confs = []
 
         lbound = bounds
         clip_mask = nodata[0, :, :]
@@ -19,6 +20,8 @@ class PostprocWorker:
                 continue
 
             dnp = result.masks.data.cpu().numpy().astype("uint8")
+            boxes_conf = result.boxes.conf.cpu().numpy() if (hasattr(result.boxes, 'conf') and result.boxes.conf is not None) else None
+
             for j in range(dnp.shape[0]):
                 l_bbox = result.boxes[j].xyxy.cpu()
 
@@ -35,6 +38,9 @@ class PostprocWorker:
                 ])
                 bbox.append([min_x, max_x, min_y, max_y])
 
+                c_score = float(boxes_conf[j]) if (boxes_conf is not None and j < len(boxes_conf)) else 0.85
+                confs.append(c_score)
+
                 ids.append(id_counter)
                 id_counter += id_counter_increment
 
@@ -43,11 +49,12 @@ class PostprocWorker:
             "masks": masks,
             "bboxes": bbox,
             "ids": ids,
+            "confs": confs,
             "bounds": lbound
         }
 
     @staticmethod
-    def process_fields(entry, mapping_dict, area_dict, instances_info, weight_info, config):
+    def process_fields(entry, mapping_dict, area_dict, conf_dict, instances_info, weight_info, config):
         dst_instances = np.ndarray(instances_info[1], dtype="int32", buffer=instances_info[0].buf)
         dst_weigths = np.ndarray(weight_info[1], dtype="float32", buffer=weight_info[0].buf)
 
@@ -69,6 +76,7 @@ class PostprocWorker:
         masks = entry["masks"]
         bboxes = entry["bboxes"]
         ids = entry["ids"]
+        confs = entry.get("confs", [])
 
         areas = []
         rel_areas = []
@@ -161,6 +169,11 @@ class PostprocWorker:
             area_dict[id] = area
             area_dict[id | 1] = area
             mapping_dict[id | 1] = [int(id)]
+
+            if index < len(confs):
+                c_val = confs[index]
+                conf_dict[int(id)] = float(c_val)
+                conf_dict[int(id | 1)] = float(c_val)
         # end compose
 
         instances[:MERGING_EDGE_WIDTH, :] |= 1
