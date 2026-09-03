@@ -1158,7 +1158,7 @@ def export_vector_layer(
             },
         )
 @app.post("/inference/fields")
-async def field_inference(
+def field_inference(
     file: UploadFile = File(...)
 ):
 
@@ -1539,7 +1539,7 @@ def field_result(
 # ============================================================
 
 @app.post("/inference/trees")
-async def tree_inference(
+def tree_inference(
     file: UploadFile = File(...)
 ):
 
@@ -1902,7 +1902,7 @@ async def tree_inference(
 # ============================================================
 
 @app.post("/inference/water")
-async def water_inference(
+def water_inference(
     file: UploadFile = File(...)
 ):
 
@@ -2237,7 +2237,7 @@ async def water_inference(
 # ============================================================
 
 @app.post("/inference/buildings")
-async def building_inference(
+def building_inference(
     file: UploadFile = File(...)
 ):
 
@@ -2652,7 +2652,7 @@ async def building_inference(
 # ============================================================
 
 @app.post("/inference/roads")
-async def road_inference(
+def road_inference(
     file: UploadFile = File(...)
 ):
 
@@ -3778,7 +3778,7 @@ def get_job_status(job_id: str):
 # ============================================================
 
 @app.post("/ingest")
-async def ingest_imagery(
+def ingest_imagery(
     file: UploadFile = File(...),
     target_crs: str = Query("EPSG:4326"),
     tile_size: int = Query(512),

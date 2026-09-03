@@ -3,13 +3,13 @@ base_config: conf_sample.yaml
 
 data_root: data/images
 output_root: data/delineated
-temp_root: data/temp_2e6e41f0
+temp_root: data/temp_60379016
 keep_temp: false
 mask_root: data/masks
 
 include:
 
-- Naksha_2e6e41f0
+- Naksha_60379016
 
 exclude: null
 override: null
